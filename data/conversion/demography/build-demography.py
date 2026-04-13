@@ -60,5 +60,8 @@ out.loc[out['name_state'] == 'puerto rico', 'region_name'] = 'South Atlantic'
 out.loc[len(out)] = ['USA', 0, 'united states', sum(out['population']),'NA']
 out = out.sort_values(by='fips_state')
 
+# make output folder if it doesn't exist
+os.makedirs('../../interim/demography', exist_ok=True)
+
 # save
 out.to_csv(os.path.join(os.getcwd(),'../../interim/demography/demography.csv'), index=False)
