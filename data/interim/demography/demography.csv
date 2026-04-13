@@ -1,0 +1,54 @@
+abbreviation_state,fips_state,name_state,population,region_name
+USA,0,united states,337053724.0,NA
+AL,1,alabama,5097361.0,East South Central
+AK,2,alaska,711711.0,Pacific
+AZ,4,arizona,7414046.0,Mountain
+AR,5,arkansas,3063976.0,West South Central
+CA,6,california,38828183.0,Pacific
+CO,8,colorado,5843317.0,Mountain
+CT,9,connecticut,3612324.0,New England
+DE,10,delaware,1028442.0,South Atlantic
+DC,11,district of columbia,675779.0,South Atlantic
+FL,12,florida,22550792.0,South Atlantic
+GA,13,georgia,10972367.0,South Atlantic
+HI,15,hawaii,1394885.0,Pacific
+ID,16,idaho,1961207.0,Mountain
+IL,17,illinois,12532834.0,East North Central
+IN,18,indiana,6861130.0,East North Central
+IA,19,iowa,3206712.0,West North Central
+KS,20,kansas,2920111.0,West North Central
+KY,21,kentucky,4509410.0,East South Central
+LA,22,louisiana,4559054.0,West South Central
+ME,23,maine,1395065.0,New England
+MD,24,maryland,6149174.0,South Atlantic
+MA,25,massachusetts,6998033.0,New England
+MI,26,michigan,10035357.0,East North Central
+MN,27,minnesota,5737303.0,West North Central
+MS,28,mississippi,2927069.0,East South Central
+MO,29,missouri,6181402.0,West North Central
+MT,30,montana,1129482.0,Mountain
+NE,31,nebraska,1971915.0,West North Central
+NV,32,nevada,3182045.0,Mountain
+NH,33,new hampshire,1401507.0,New England
+NJ,34,new jersey,9283473.0,Middle Atlantic
+NM,35,new mexico,2100958.0,Mountain
+NY,36,new york,19551916.0,Middle Atlantic
+NC,37,north carolina,10735800.0,South Atlantic
+ND,38,north dakota,776725.0,West North Central
+OH,39,ohio,11779411.0,East North Central
+OK,40,oklahoma,4035489.0,West South Central
+OR,41,oregon,4231939.0,Pacific
+PA,42,pennsylvania,12958943.0,Middle Atlantic
+RI,44,rhode island,1092402.0,New England
+SC,45,south carolina,5335324.0,South Atlantic
+SD,46,south dakota,916006.0,West North Central
+TN,47,tennessee,7106807.0,East South Central
+TX,48,texas,30391114.0,West South Central
+UT,49,utah,3413293.0,Mountain
+VT,50,vermont,647315.0,New England
+VA,51,virginia,8615980.0,South Atlantic
+WA,53,washington,7764081.0,Pacific
+WV,54,west virginia,1769881.0,South Atlantic
+WI,55,wisconsin,5909578.0,East North Central
+WY,56,wyoming,581296.0,Mountain
+PR,72,puerto rico,3204000.0,South Atlantic
