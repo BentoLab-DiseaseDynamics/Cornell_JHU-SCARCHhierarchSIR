@@ -16,6 +16,10 @@ Contains an overview of the raw data sources, and the conversion scripts used to
 
 + `demography.csv`: Population of US states (2023). Columns: 'name_state', 'fips_state', 'name_state', 'population', 'region_name'.
 
+### Geography
+
++ `adjacency_matrix.csv`: Adjacency matrix of US states.
+
 ### NHSN-HRD_archive
 
 + `NHSN-HRD_ending-YYYYWW_gathered-YYYY-MM-DD-HH-MM-SS.parquet`: Hospital incidence for COVID-19, Influenza and RSV in every US state and per epiweek, as obtained from the NHSN HRD dataset. Automatically updated and archived weekly through a Github action: `~/.github/workflows/automated_data_collection.yml`. Columns: 'season', 'year', 'MMWR', 'date', 'fips_state', 'name_state', 'influenza admissions', 'covid-19 admissions', 'rsv admissions'.
@@ -35,3 +39,7 @@ To be filled out later.
 + `fetch-format_NHSN-HRD-data.py`: Script to collect NHSN HRD data, format it and archive it. Called through a Github action: `~/.github/workflows/fetch-preliminary_NHSN_HRD.yml`.
 
 + `backfill_preliminary-NHSN-HRD-data.py`: Script used to backfill the preliminary NHSN HRD data. Called through a Github action: `~/.github/workflows/backfill-preliminary_NHSN_HRD.yml`.
+
+### Geography
+
++ `make-adjacency_matrix.py`: Script to build an adjacency matrix of the US states. Uses a hard-coded dictionary of neighbours.
