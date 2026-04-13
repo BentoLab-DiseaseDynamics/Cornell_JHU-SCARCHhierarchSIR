@@ -1,0 +1,21 @@
+name: BENTOLAB-SCARCH_HIERARCHSIR
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - pymc>=5 
+  - pytensor
+  - pytensor-base
+  - arviz
+  - jax
+  - diffrax  
+  - optax
+  - jupyter
+  - matplotlib
+  - numpy
+  - pandas
+  - scipy
+  - pyarrow
+  - fastparquet
+  - openpyxl
