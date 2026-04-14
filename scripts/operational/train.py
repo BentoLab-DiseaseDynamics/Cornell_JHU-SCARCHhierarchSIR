@@ -54,6 +54,7 @@ n_chains = 1
 n_samples = 2
 n_burn = 0
 training_name = 'exclude_None'
+n_preoptim = 15000
 
 # derived products
 ## convert to a list of start and enddates (datetime)
@@ -619,7 +620,7 @@ def neg_log_likelihood(args_diff):
 # optimize
 optimizer = optax.adam(1e-2)
 opt_state = optimizer.init(args_diff)
-for i in range(300):
+for i in range(n_preoptim):
     loss, grads = jax.value_and_grad(neg_log_likelihood)(args_diff)
     updates, opt_state = optimizer.update(grads, opt_state)
     args_diff = optax.apply_updates(args_diff, updates)
