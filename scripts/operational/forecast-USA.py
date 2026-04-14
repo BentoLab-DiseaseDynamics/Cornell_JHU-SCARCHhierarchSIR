@@ -1,3 +1,13 @@
+"""
+This makes a forecast for unseen data.
+
+Author: T.W. Alleman
+Affiliation: Bento Lab, Cornell CVM
+Copyright (c) 2026 T.W. Alleman
+
+Licensed under CC BY-NC-SA 4.0
+"""
+
 # standard python libraries
 import os
 import numpy as np

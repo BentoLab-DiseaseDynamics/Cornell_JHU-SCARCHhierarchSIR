@@ -1,9 +1,12 @@
 """
 This script downloads, formats and archives the NHSN HRD dataset
-"""
 
-__author__      = "T.W. Alleman & Clif McKee"
-__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
+Authors: T.W. Alleman & Clif McKee
+Affiliation: Bento Lab, Cornell CVM; IDD Group, JHBSPH
+Copyright (c) 2026 T.W. Alleman
+
+Licensed under CC BY-NC-SA 4.0
+"""
 
 ##################
 ## Dependencies ##

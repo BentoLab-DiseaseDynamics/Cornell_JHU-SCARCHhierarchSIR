@@ -1,9 +1,12 @@
 """
-This scripts trains our model to the historical data
-"""
+This script trains the SCARCH hierarchical SIR model on historical data.
 
-__author__      = "T.W. Alleman"
-__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
+Author: T.W. Alleman
+Affiliation: Bento Lab, Cornell CVM
+Copyright (c) 2026 T.W. Alleman
+
+Licensed under CC BY-NC-SA 4.0
+"""
 
 # standard python libraries
 import os

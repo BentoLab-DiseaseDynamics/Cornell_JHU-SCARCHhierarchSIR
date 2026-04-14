@@ -2,10 +2,13 @@
 This script loads the archived preliminary NHSN HRD data and estimates the relative change two weeks post-reporting due to backfill.
 It then takes the latest available preliminary dataset in `~/data/interim/cases/NHSN-HRD_archive/preliminary`,
 backfills it and saves it in the `~/data/interim/cases/NHSN-HRD_archive/preliminary_backfilled` folder.
-"""
 
-__author__      = "T.W. Alleman"
-__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
+Author: T.W. Alleman
+Affiliation: Bento Lab, Cornell CVM
+Copyright (c) 2026 T.W. Alleman
+
+Licensed under CC BY-NC-SA 4.0
+"""
 
 ##################
 ## Dependencies ##
