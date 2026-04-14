@@ -22,6 +22,11 @@ import jax.numpy as jnp
 from jax.scipy.signal import convolve
 import diffrax
 
+# pytensor and pymc
+import pytensor.tensor as pt
+from pytensor.graph import Apply, Op
+from pytensor.link.jax.dispatch import jax_funcify
+
 # Define relevant global  variables
 abs_dir = os.path.dirname(__file__)
 
@@ -136,9 +141,9 @@ def sol_op_jax(args_diff, args_nodiff, args_static):
     return sol.ys[:,-1] # return observed state only
 
 
-##########################
-## JIT-compile with jax ##
-##########################
+##########################################
+## JIT-compile forward simulating model ##
+##########################################
 
 # Define jax jitted foward simulation functions
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -199,3 +204,82 @@ def get_jax_jitted_model():
     Write a docstring
     """
     return jax.jit(sol_op_multi, static_argnums=2), jax.jit(vjp_sol_op_multi, static_argnums=3)
+
+
+###########################################################
+## Register JIT-compiled jax ODE model for use with pyMC ##
+###########################################################
+
+# =========================
+# Core Op implementations
+# =========================
+
+class VJPSolOp(Op):
+    def __init__(self, args_static, jitted_vjp_op):
+        self.args_static = args_static
+        self.jitted_vjp_op = jitted_vjp_op
+
+    def make_node(self, args_diff, gz, args_nodiff):
+        return Apply(self, [
+            pt.as_tensor_variable(args_diff),
+            pt.as_tensor_variable(gz),
+            pt.as_tensor_variable(args_nodiff)
+        ], [pt.tensor3()])
+
+    def perform(self, node, inputs, outputs):
+        args_diff, gz, args_nodiff = inputs
+        grad = self.jitted_vjp_op(args_diff, gz, args_nodiff, self.args_static)
+        outputs[0][0] = np.asarray(grad, dtype=np.float64)
+
+
+class SolOp(Op):
+    def __init__(self, args_static, jitted_sol_op, jitted_vjp_op):
+        self.args_static = args_static
+        self.jitted_sol_op = jitted_sol_op
+        self.vjp_sol_op = VJPSolOp(args_static, jitted_vjp_op)
+
+    def make_node(self, args_diff, args_nodiff):
+        return Apply(self, [
+            pt.as_tensor_variable(args_diff),
+            pt.as_tensor_variable(args_nodiff)
+        ], [pt.tensor3()])
+
+    def perform(self, node, inputs, outputs):
+        args_diff, args_nodiff = inputs
+        ys = self.jitted_sol_op(args_diff, args_nodiff, self.args_static)
+        outputs[0][0] = np.asarray(ys, dtype=np.float64)
+
+    def grad(self, inputs, output_grads):
+        args_diff, args_nodiff = inputs
+        (gz,) = output_grads
+
+        grad_wrt_args_diff = self.vjp_sol_op(args_diff, gz, args_nodiff)
+        grad_wrt_args_nodiff = pt.zeros_like(args_nodiff)
+
+        return [grad_wrt_args_diff, grad_wrt_args_nodiff]
+
+
+# =========================
+# JAX registration
+# =========================
+
+@jax_funcify.register(SolOp)
+def sol_op_jax_funcify(op, **kwargs):
+    return lambda args_diff, args_nodiff: op.jitted_sol_op(
+        args_diff, args_nodiff, op.args_static
+    )
+
+
+@jax_funcify.register(VJPSolOp)
+def vjp_sol_op_jax_funcify(op, **kwargs):
+    return lambda args_diff, gz, args_nodiff: op.jitted_vjp_op(
+        args_diff, gz, args_nodiff, op.args_static
+    )
+
+
+# =========================
+# Factory function
+# =========================
+
+def make_sol_op(args_static, jitted_sol_op, jitted_vjp_op):
+    return SolOp(args_static, jitted_sol_op, jitted_vjp_op)

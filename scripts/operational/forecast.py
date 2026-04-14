@@ -31,7 +31,7 @@ import diffrax
 import optax
 # model package
 from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data
-from SCARCHhierarchSIR.models import get_jax_jitted_model
+from SCARCHhierarchSIR.models import get_jax_jitted_model, make_sol_op
 
 # all paths defined relative to this file
 abs_dir = os.path.dirname(__file__)
@@ -52,7 +52,7 @@ training_folder = os.path.join(abs_dir, f'../../data/interim/calibration/trainin
 seasons = ['2025-2026',]        # script only works with one season
 n_observations = 52             # use all data available in the forecast season
 forecast_horizon = 4            # forecast 4 weeks ahead
-n_samples = 100
+n_samples = 20
 n_tune = 10
 n_chains = 1
 sigma_grw = 0.375
@@ -124,60 +124,8 @@ jitted_sol_op_multi, jitted_vjp_sol_op_multi = get_jax_jitted_model()
 # Define the Op and VJPOp classes for the ODE problem
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-class SolOp(Op):
-    def __init__(self, args_static):
-        self.args_static = args_static
-        self.vjp_sol_op = VJPSolOp(args_static)
-
-    def make_node(self, args_diff, args_nodiff):
-        args_diff = pt.as_tensor_variable(args_diff)
-        args_nodiff = pt.as_tensor_variable(args_nodiff)
-        return Apply(self, [args_diff, args_nodiff], [pt.tensor3()])
-
-    def perform(self, node, inputs, outputs):
-        args_diff, args_nodiff = inputs
-        ys = jitted_sol_op_multi(args_diff, args_nodiff, self.args_static)
-        outputs[0][0] = np.asarray(ys, dtype=np.float64)
-
-    def grad(self, inputs, output_grads):
-        args_diff, args_nodiff = inputs
-        (gz,) = output_grads
-
-        grad_wrt_args_diff = self.vjp_sol_op(args_diff, gz, args_nodiff)
-        grad_wrt_args_nodiff = pt.zeros_like(args_nodiff)  # block gradients
-
-        return [grad_wrt_args_diff, grad_wrt_args_nodiff]
-
-
-class VJPSolOp(Op):
-    def __init__(self, args_static):
-        self.args_static = args_static
-
-    def make_node(self, args_diff, gz, args_nodiff):
-        return Apply(self, [
-            pt.as_tensor_variable(args_diff),   
-            pt.as_tensor_variable(gz),         
-            pt.as_tensor_variable(args_nodiff)  
-        ], [pt.tensor3()])                      
-
-    def perform(self, node, inputs, outputs):
-        args_diff, gz, args_nodiff = inputs
-        # Use the new batched VJP
-        grad = jitted_vjp_sol_op_multi(args_diff, gz, args_nodiff, self.args_static)
-        # Convert to NumPy array for Theano
-        outputs[0][0] = np.asarray(grad, dtype=np.float64)
-
-# Register with jax
-# ~~~~~~~~~~~~~~~~~
-
-@jax_funcify.register(SolOp)
-def sol_op_jax_funcify(op, **kwargs):
-    return lambda args_diff, args_nodiff: jitted_sol_op_multi(args_diff, args_nodiff, op.args_static)
-
-@jax_funcify.register(VJPSolOp)
-def vjp_sol_op_jax_funcify(op, **kwargs):
-    return lambda args_diff, gz, args_nodiff: jitted_vjp_sol_op_multi(args_diff, gz, args_nodiff, op.args_static)
-
+args_static = (start_simulation, max(ts[:,-1]), modifier_length)
+sol_op = make_sol_op(args_static, jitted_sol_op_multi, jitted_vjp_sol_op_multi)
 
 # Pre-optimize the forward simulation model's parameters
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -303,21 +251,11 @@ print("Max reconstruction error:", np.abs(reconstructed - logit_fR_opt).max())
 # Register with pyMC
 # ~~~~~~~~~~~~~~~~~~
 
-# (make it so that it runs to end of forecast horizon)
- 
-# static arguments
-args_static = (start_simulation, float(max(ts[:,-1])), modifier_length)
-
 # non-differentiable arguments
 gamma_vec = jnp.full((n_seasons, n_states, 1), gamma)
 pop_mat = jnp.broadcast_to(jnp.asarray(demo)[None, :, None], (n_seasons, n_states, 1))
 ts_mat = jnp.broadcast_to(ts[:, None, :], (n_seasons, n_states, ts.shape[1]))
 args_nodiff = np.array(jnp.concatenate([gamma_vec, pop_mat, ts_mat], axis=2))     # shape: (n_seasons, n_states, )  --> convert to numpy otherwise error in pt.as_tensor_variable(args_nodiff) in make_node of pyMC model
-
-# Compile forward simulation model as a pyMC probablistic node
-sol_op = SolOp(args_static)
-vjp_sol_op = VJPSolOp(args_static)
-
 
 # Build tempored NB distribution
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
