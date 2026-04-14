@@ -5,9 +5,8 @@ channels:
 dependencies:
   - python=3.13
   - pymc>=5 
+  - arviz<1.0  
   - pytensor
-  - pytensor-base
-  - arviz
   - jax
   - diffrax  
   - optax

@@ -7,12 +7,11 @@ import matplotlib.dates as mdates
 from datetime import datetime, timedelta
 # pyMC / pytensor
 import pymc as pm
-import pymc.sampling.jax
 import arviz
 import pytensor
 import pytensor.tensor as pt
-pytensor.config.cxx = '/usr/bin/clang++'
-pytensor.config.on_opt_error = "ignore"
+#pytensor.config.cxx = '/usr/bin/clang++'
+#pytensor.config.on_opt_error = "ignore"
 from pytensor.graph import Apply, Op
 from pytensor.link.jax.dispatch import jax_funcify
 # jax and diffrax
@@ -26,10 +25,31 @@ import optax
 abs_dir = os.path.dirname(__file__)
 
 # global parameters go here
+## model-structural
 gamma = 1/3.5
-output_folder = os.path.join(abs_dir, 'output/training')
-training_name = 'exclude_None'
+n_modifiers = 26
+modifier_length = 7
+start_simulation = -15 # (October 1)
+## geographical extent of training
 regions = ['New England', 'Middle Atlantic']
+## temporal extent of training
+n_observations = 25
+start_calibration_month = 10
+seasons = ['2023-2024', '2024-2025', '2025-2026']
+## sampling effort
+n_chains = 1
+n_samples = 2
+n_burn = 0
+training_name = 'exclude_None'
+
+# derived products
+## convert to a list of start and enddates (datetime)
+n_seasons = len(seasons)
+start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
+modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
+## misc
+assert n_samples > n_burn, 'number of burned samples cannot exceed total number of samples'
+output_folder = os.path.join(abs_dir, f'../../data/interim/calibration/training/{training_name}')
 
 # Get US demographics
 # ~~~~~~~~~~~~~~~~~~~
@@ -52,7 +72,7 @@ def get_demography(regions=None):
         contains the corresponding population
     """
     # get data
-    demo = pd.read_csv(os.path.join(abs_dir, 'demography.csv'))
+    demo = pd.read_csv(os.path.join(abs_dir, '../../data/interim/demography/demography.csv'))
     # slice out right regions
     if regions:
         demo = demo[demo['region_name'].isin(regions)]
@@ -65,24 +85,11 @@ n_states = len(demo)
 # Get state adjacency matrix
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# get and slice
-adj = pd.read_csv(os.path.join(abs_dir, 'adjacency_matrix.csv'), index_col=0)
+adj = pd.read_csv(os.path.join(abs_dir, '../../data/interim/geography/adjacency_matrix.csv'), index_col=0)
 adj = adj.loc[state_fips_index['abbreviation_state'].values, state_fips_index['abbreviation_state'].values]
 
 # Get US incidences
 # ~~~~~~~~~~~~~~~~~
-
-# convert to a list of start and enddates (datetime)
-seasons = ['2023-2024', '2024-2025', '2025-2026']        # pyMC AR-GARCH scan doesn't work with only one season but forward simulating model does
-n_seasons = len(seasons)
-n_observations = 23
-# the following variables must match the forecasting script
-n_modifiers = 26
-modifier_length = 7
-start_calibration_month = 10    # (year X)
-start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
-modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
-start_simulation = -15 # (October 1)
 
 def get_data(start_calibrations, modifier_reference_dates, n_observations, state_fips=None):
     """
@@ -101,7 +108,7 @@ def get_data(start_calibrations, modifier_reference_dates, n_observations, state
     # loop over seasons
     for i, (start_calibration, modifier_reference_date) in enumerate(zip(start_calibrations, modifier_reference_dates)):
         # get the data
-        df = pd.read_parquet(os.path.join(abs_dir, 'NHSN-HRD_reference-date-2026-03-14_gathered-2026-03-11-18-20-58.parquet.gzip'))
+        df = pd.read_parquet(os.path.join(abs_dir, '../../data/interim/cases/NHSN-HRD_archive/preliminary_backfilled/NHSN-HRD_reference-date-2026-04-11_gathered-2026-04-08-17-43-04.parquet.gzip'))
         # convert date column to datetime and fips_state to int
         df['date'] = pd.to_datetime(df['date'], format='ISO8601')
         df['fips_state'] = df['fips_state'].astype(int)
@@ -127,7 +134,6 @@ def get_data(start_calibrations, modifier_reference_dates, n_observations, state
 
 # get the data
 data, dt, ts = get_data(start_calibrations, modifier_reference_dates, n_observations, state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
-
 
 # Define a jax-jitted diffrax differential equation model
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -680,11 +686,12 @@ with pm.Model(coords=coords) as model:
     sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims=("season","state"))
 
     # Run AR-GARCH scan over T steps
-    (z_seq, sigma2_seq, eps_seq), _ = pytensor.scan(
+    z_seq, sigma2_seq, eps_seq = pytensor.scan(
         fn=step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
         non_sequences=[psi, omega, a_garch, b_garch],
+        return_updates=False
     )
 
     # Register deterministic variables to inspect later
@@ -710,13 +717,11 @@ with pm.Model(coords=coords) as model:
 # Sample pyMC model
 # ~~~~~~~~~~~~~~~~~
 
-n_chains = 3
-
 with model:
     # set step size directly
     step = pm.NUTS(step_scale=0.002, target_accept=0.8, max_treedepth=12)   # for US: step_scale: 0.002 + max_treedepth 12
     # run sampler without tuning
-    trace = pm.sample(100, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
+    trace = pm.sample(n_samples, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
                         initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': delta_beta_mu_opt / 0.25,
                                   'log_rho_global_mean': log_rho_global_init, 'rho_state_sd': 0.2, 'rho_state_raw': rho_state_init / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': rho_season_init / 0.2,
                                   'log_fI_global_mean': log_fI_global_init, 'fI_state_sd': 0.2, 'fI_state_raw': fI_state_init / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': fI_season_init / 0.2,
@@ -726,7 +731,6 @@ with model:
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
 
 # manual burn
-n_burn = 50
 trace = trace.isel(draw=slice(n_burn, None))
 
 # Generate traces
