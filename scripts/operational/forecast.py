@@ -206,8 +206,8 @@ def get_data(
     start_calibrations: Iterable[pd.Timestamp],
     modifier_reference_dates: Iterable[pd.Timestamp],
     n_observations: int,
-    forecast_horizon: int,
     type: str = "preliminary_backfilled",
+    forecast_horizon: int = None,
     state_fips: Optional[Iterable[int]] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -221,12 +221,13 @@ def get_data(
         Reference dates defining t=0 for each season's time index.
     n_observations : int
         Number of weekly observations used for calibration.
-    forecast_horizon : int
-        Number of weeks to extend beyond observed data for forecasting.
     type : str, default="preliminary_backfilled"
         Data source type. Must be either:
         - "preliminary"
         - "preliminary_backfilled"
+    forecast_horizon : int or None
+        Number of weeks to extend beyond observed data for forecasting.
+        Use 'None' for training (default)
     state_fips : Optional[Iterable[int]], default=None
         List of state FIPS codes to include. If None, all states are used.
 
@@ -259,6 +260,9 @@ def get_data(
         data_folder = Path(abs_dir) / "../../data/interim/cases/NHSN-HRD_archive/preliminary_backfilled/"
     else:
         raise ValueError("`type` must be 'preliminary' or 'preliminary_backfilled'.")
+    # determine if training or forecasting
+    if forecast_horizon:
+        assert len(start_calibrations) == len(modifier_reference_dates) == 1, 'length of `start_calibrations` and `modifier_reference_dates` must be equal to one when using this function for forecasting'
 
     data: List[np.ndarray] = []
     dates: List[np.ndarray] = []
@@ -284,12 +288,17 @@ def get_data(
         df["influenza admissions"] = (df.groupby("fips_state")["influenza admissions"].bfill())
 
         # determine the data's end date
-        last_existing_date = df["date"].max()
         user_end_date = start_calibration + timedelta(weeks=n_observations)
-        if user_end_date <= last_existing_date:
-            target_end_date = user_end_date + pd.Timedelta(weeks=forecast_horizon)
+        if forecast_horizon:
+            # assume 'forecasting' mode, only one season, number of observations can exceed the end of the data
+            last_existing_date = df["date"].max()
+            if user_end_date <= last_existing_date:
+                target_end_date = user_end_date + pd.Timedelta(weeks=forecast_horizon)
+            else:
+                target_end_date = last_existing_date + pd.Timedelta(weeks=forecast_horizon)
         else:
-            target_end_date = last_existing_date + pd.Timedelta(weeks=forecast_horizon)
+            # assume 'training' mode, more than one season, number of observations in each season must be identical
+            target_end_date = user_end_date
 
         # generate dataframe encompassing calibration + forecast ranges
         all_dates = pd.date_range(start=df["date"].min(), end=target_end_date, freq="7D")
@@ -314,13 +323,13 @@ def get_data(
     data_arr = np.stack(data, axis=0)
     dates_arr = np.stack(dates, axis=0)
     timesteps_arr = np.stack(timesteps, axis=0)
-    true_n_observations = len(dt[0]) - forecast_horizon
+    true_n_observations = len(timesteps_arr[0]) - forecast_horizon
 
     # compute the actual number of observations
     return data_arr, dates_arr, timesteps_arr, true_n_observations
 
 # get the data
-data, dt, ts, n_observations = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+data, dt, ts, n_observations = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 
 # divide weekly incidence by 7
 data = data / 7
