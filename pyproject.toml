@@ -16,6 +16,8 @@ dependencies = [
     "pandas",
     "jax",
     "diffrax",
+    "pymc>=5.0",
+    "pytensor",
     "openpyxl",
     "pytest",
 ]

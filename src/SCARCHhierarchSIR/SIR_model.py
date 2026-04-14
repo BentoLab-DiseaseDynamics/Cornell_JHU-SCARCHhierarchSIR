@@ -1,5 +1,5 @@
 """
-This script contains all functions related to the forward-simulating ODE model
+This script contains all functions related to the forward-simulating SIR ODE model
 
 Authors: T.W. Alleman
 Affiliation: Bento Lab, Cornell CVM
@@ -12,9 +12,8 @@ Licensed under CC BY-NC-SA 4.0
 ## Dependencies ##
 ##################
 
-import os
+# general purpose python
 import numpy as np
-import pandas as pd
 
 # jax and diffrax
 import jax
@@ -26,9 +25,6 @@ import diffrax
 import pytensor.tensor as pt
 from pytensor.graph import Apply, Op
 from pytensor.link.jax.dispatch import jax_funcify
-
-# Define relevant global  variables
-abs_dir = os.path.dirname(__file__)
 
 ##############################################
 ## Foward-simulating SIR model with diffrax ##
