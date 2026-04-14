@@ -323,10 +323,12 @@ def get_data(
     data_arr = np.stack(data, axis=0)
     dates_arr = np.stack(dates, axis=0)
     timesteps_arr = np.stack(timesteps, axis=0)
-    true_n_observations = len(timesteps_arr[0]) - forecast_horizon
 
     # compute the actual number of observations
-    return data_arr, dates_arr, timesteps_arr, true_n_observations
+    if forecast_horizon:
+        n_observations = len(timesteps_arr[0]) - forecast_horizon
+
+    return data_arr, dates_arr, timesteps_arr, n_observations
 
 # get the data
 data, dt, ts, n_observations = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
