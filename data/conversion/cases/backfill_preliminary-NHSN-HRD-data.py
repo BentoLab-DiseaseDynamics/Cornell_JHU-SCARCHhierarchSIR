@@ -5,7 +5,7 @@ backfills it and saves it in the `~/data/interim/cases/NHSN-HRD_archive/prelimin
 """
 
 __author__      = "T.W. Alleman"
-__copyright__   = "Copyright (c) 2025 by T.W. Alleman, IDD Group (JHUBSPH) & Bento Lab (Cornell CVM). All Rights Reserved."
+__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
 
 ##################
 ## Dependencies ##

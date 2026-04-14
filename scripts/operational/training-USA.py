@@ -1,3 +1,10 @@
+"""
+This scripts trains our model to the historical data
+"""
+
+__author__      = "T.W. Alleman"
+__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
+
 # standard python libraries
 import os
 import numpy as np

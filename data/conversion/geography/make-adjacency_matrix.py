@@ -2,6 +2,9 @@
 This script builds an adjacency matrix for the US
 """
 
+__author__      = "T.W. Alleman"
+__copyright__   = "Copyright (c) 2026 by T.W. Alleman, Bento Lab (Cornell CVM). All Rights Reserved."
+
 import os
 import pandas as pd
 
