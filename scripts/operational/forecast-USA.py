@@ -1,5 +1,5 @@
 """
-This makes a forecast for unseen data.
+This script makes a forecast for unseen data.
 
 Author: T.W. Alleman
 Affiliation: Bento Lab, Cornell CVM
@@ -10,19 +10,20 @@ Licensed under CC BY-NC-SA 4.0
 
 # standard python libraries
 import os
+import re
 import numpy as np
 import pandas as pd
+from pathlib import Path
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from datetime import datetime, timedelta
+from typing import Iterable, Optional, Tuple, List
 # pyMC / pytensor
 import pymc as pm
-import pymc.sampling.jax
 import arviz
 import pytensor
 import pytensor.tensor as pt
-pytensor.config.cxx = '/usr/bin/clang++'
-pytensor.config.on_opt_error = "ignore"
+#pytensor.config.cxx = '/usr/bin/clang++'
+#pytensor.config.on_opt_error = "ignore"
 from pytensor.graph import Apply, Op
 from pytensor.link.jax.dispatch import jax_funcify
 # jax and diffrax
@@ -36,39 +37,73 @@ import optax
 abs_dir = os.path.dirname(__file__)
 
 # global parameters go here
+## model-structural
 gamma = 1/3.5
-training_name = 'exclude_None'
-training_folder = os.path.join(abs_dir, 'output/training')
-output_folder = os.path.join(abs_dir, 'output/forecasting')
+n_modifiers = 26
+modifier_length = 7
+start_simulation = -15
+## geographical extent of training
 regions = ['New England', 'Middle Atlantic']
+## training metadata
+start_calibration_month = 10
+training_name = 'exclude_None'
+training_folder = os.path.join(abs_dir, f'../../data/interim/calibration/training/{training_name}')
+## forecasting settings
+seasons = ['2025-2026',]        # script only works with one season
+n_observations = 52             # use all data available in the forecast season
+forecast_horizon = 4            # forecast 4 weeks ahead
+n_samples = 100
+n_tune = 10
+n_chains = 1
+sigma_grw = 0.375
+
+# derived products
+## convert to a list of start and enddates (datetime)
+n_seasons = len(seasons)
+start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
+modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
+## misc
+assert n_samples > n_tune, 'number of tuning samples cannot exceed total number of samples'
+output_folder = os.path.join(abs_dir, f'../../data/interim/calibration/forecasting/{training_name}')
+
 
 # Get US demographics
 # ~~~~~~~~~~~~~~~~~~~
 
-def get_demography(regions=None):
+def get_demography(regions: Optional[Iterable[str]]=None) -> Tuple[pd.DataFrame, np.ndarray]:
     """
-    input
-    -----
+    Load and optionally filter state-level demographic data.
 
-    regions: list
-        A list containing the regions 
-    
-    output
-    ------
+    Parameters
+    ----------
+    regions : Optional[Iterable[str]], default=None
+        Iterable of region names to filter on (matching `region_name` column in `~/data/interim/demography/demography.csv`).
+        If None, all regions are included.
 
-    state_fips_index: pd.DataFrame
-        contains the abbreviation, name and fips code of states
-    
-    demography: np.ndarray
-        contains the corresponding population
+    Returns
+    -------
+    Tuple[pd.DataFrame, np.ndarray]
+        state_fips_index : pd.DataFrame
+            DataFrame with columns:
+            ['abbreviation_state', 'name_state', 'fips_state'].
+        demography : np.ndarray
+            Array of population counts corresponding to the returned states.
     """
-    # get data
-    demo = pd.read_csv(os.path.join(abs_dir, 'demography.csv'))
-    # slice out right regions
-    if regions:
-        demo = demo[demo['region_name'].isin(regions)]
-    # return index and demography
-    return demo[['abbreviation_state', 'name_state', 'fips_state']], demo['population'].values
+
+    demo = pd.read_csv(
+        os.path.join(abs_dir, "../../data/interim/demography/demography.csv")
+    )
+
+    if regions is not None:
+        demo = demo[demo["region_name"].isin(regions)]
+
+    state_fips_index = demo[
+        ["abbreviation_state", "name_state", "fips_state"]
+    ]
+
+    demography = demo["population"].to_numpy()
+
+    return state_fips_index, demography
 
 state_fips_index, demo = get_demography(regions)
 n_states = len(demo)
@@ -76,84 +111,219 @@ n_states = len(demo)
 # Get state adjacency matrix
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# get and slice
-adj = pd.read_csv(os.path.join(abs_dir, 'adjacency_matrix.csv'), index_col=0)
-adj = adj.loc[state_fips_index['abbreviation_state'].values, state_fips_index['abbreviation_state'].values]
+def get_adjacency_matrix(abbreviation_state: Iterable[str]) -> pd.DataFrame:
+    """
+    Load and subset the state adjacency matrix to the specified states.
+
+    Parameters
+    ----------
+    abbreviation_state : list
+        List containing state abbreviations.
+        The ordering of this list determines the ordering of the
+        returned adjacency matrix.
+
+    Returns
+    -------
+    np.ndarray
+        Square adjacency matrix indexed and columned by state abbreviations,
+    """
+
+    adj = pd.read_csv(
+        os.path.join(abs_dir, "../../data/interim/geography/adjacency_matrix.csv"),
+        index_col=0,
+    )
+
+    return adj.loc[abbreviation_state, abbreviation_state].values
+
+adj = get_adjacency_matrix(state_fips_index['abbreviation_state'])
 
 # Get US incidence data
 # ~~~~~~~~~~~~~~~~~~~~~
 
-# convert to a list of start and enddates (datetime)
-seasons = ['2025-2026',]        # script works with only one season
-n_seasons = len(seasons)
-n_observations = 52             # use all data available in the forecast season
-forecast_horizon = 4
-# the following variables must match the training script
-n_modifiers = 26
-modifier_length = 7
-start_calibration_month = 10    # (year X)
-start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
-modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
-start_simulation = -15 # (October 1)
-
-def get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon, state_fips=None):
+def extract_timestamp(fname: Path, pattern: re.Pattern[str]) -> Optional[datetime]:
     """
-    A function formatting the model's input data
+    Extract a timestamp from the NHSN HRD data filenames using a regex pattern.
 
-    output:
+    The filename is expected to contain a single capturing group corresponding
+    to a timestamp formatted as "%Y-%m-%d-%H-%M-%S".
+
+    Parameters
+    ----------
+    fname : Path
+        File path whose name will be searched.
+    pattern : re.Pattern[str]
+        Compiled regex pattern with one capturing group for the timestamp.
+
+    Returns
     -------
-    data --> (n_season, n_states, n_observations): number of lab-confirmed influenza admissions
-    dates --> (n_season, n_observations): corresponding date
-    timesteps --> (n_season, n_observations): data's time index relative to forward simulation model's t=0
+    Optional[datetime]
+        Parsed datetime if a match is found, otherwise None.
     """
+    match = pattern.search(fname.name)
+    if match:
+        return datetime.strptime(match.group(1), "%Y-%m-%d-%H-%M-%S")
+    return None
+
+def get_most_recent_filename(data_folder: Path) -> Path:
+    """
+    Retrieve the most recent NHSN HRD parquet file path in a folder based on timestamps embedded in the filenames.
+
+    Filenames are expected to contain the pattern:
+    'gathered-YYYY-MM-DD-HH-MM-SS*.parquet.gzip'.
+
+    Parameters
+    ----------
+    data_folder : Path
+        Directory containing parquet files.
+
+    Returns
+    -------
+    Path
+        Path to the most recent file.
+
+    Raises
+    ------
+    ValueError
+        If no valid timestamped files are found.
+    """
+    pattern = re.compile(r"gathered-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
+
+    files_with_time: List[Tuple[Path, Optional[datetime]]] = [
+        (f, extract_timestamp(f, pattern))
+        for f in data_folder.glob("*.parquet.gzip")
+    ]
+
+    files_with_time = [(f, t) for f, t in files_with_time if t is not None]
+
+    if not files_with_time:
+        raise ValueError(f"No valid timestamped files found in {data_folder}")
+
+    latest_file, _ = max(files_with_time, key=lambda x: x[1])
+    return latest_file
+
+
+def get_data(
+    start_calibrations: Iterable[pd.Timestamp],
+    modifier_reference_dates: Iterable[pd.Timestamp],
+    n_observations: int,
+    forecast_horizon: int,
+    type: str = "preliminary_backfilled",
+    state_fips: Optional[Iterable[int]] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Format influenza hospitalization data for model input.
+
+    Parameters
+    ----------
+    start_calibrations : Iterable[pd.Timestamp]
+        Start date of calibration period for each season.
+    modifier_reference_dates : Iterable[pd.Timestamp]
+        Reference dates defining t=0 for each season's time index.
+    n_observations : int
+        Number of weekly observations used for calibration.
+    forecast_horizon : int
+        Number of weeks to extend beyond observed data for forecasting.
+    type : str, default="preliminary_backfilled"
+        Data source type. Must be either:
+        - "preliminary"
+        - "preliminary_backfilled"
+    state_fips : Optional[Iterable[int]], default=None
+        List of state FIPS codes to include. If None, all states are used.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        data : np.ndarray
+            Shape: (n_seasons, n_states, n_timepoints), weekly admissions (scaled by 1/7).
+        dates : np.ndarray
+            Shape: (n_seasons, n_timepoints), datetime values.
+        timesteps : np.ndarray
+            Shape: (n_seasons, n_timepoints), time in days since model's reference date (t=0; October 15).
+        true_n_observations: int
+            The available number of observations (input `n_observations` can exceed the available data).
+
+    Raises
+    ------
+    ValueError
+        If an invalid data type is provided.
     
-    data = []
-    dates = []
-    timesteps = []
-    # loop over seasons
-    for i, (start_calibration, modifier_reference_date) in enumerate(zip(start_calibrations, modifier_reference_dates)):
-        # get the data
-        df = pd.read_parquet(os.path.join(abs_dir, 'NHSN-HRD_reference-date-2026-03-14_gathered-2026-03-11-18-20-58.parquet.gzip'))
-        # convert date column to datetime and fips_state to int
-        df['date'] = pd.to_datetime(df['date'], format='ISO8601')
-        df['fips_state'] = df['fips_state'].astype(int)
-        # slice out states of interest
-        df = df[df['fips_state'].isin(state_fips)]
-        # slice out variables of interest
-        df = df[['date', 'fips_state', 'influenza admissions']]
-        # trim the bottom temporally
-        df = df[df['date'] > start_calibration]
-        # Backward fill per state (Happens first week of season 2024-2025 in 3 states)
-        df['influenza admissions'] = df.groupby('fips_state')['influenza admissions'].bfill()
+    Notes
+    -----
+    n_seasons should be equal to one for forecasting
+    """
+
+    # determine type of data to use
+    if type == "preliminary":
+        data_folder = Path(abs_dir) / "../../data/interim/cases/NHSN-HRD_archive/preliminary/"
+    elif type == "preliminary_backfilled":
+        data_folder = Path(abs_dir) / "../../data/interim/cases/NHSN-HRD_archive/preliminary_backfilled/"
+    else:
+        raise ValueError("`type` must be 'preliminary' or 'preliminary_backfilled'.")
+
+    data: List[np.ndarray] = []
+    dates: List[np.ndarray] = []
+    timesteps: List[np.ndarray] = []
+
+    for start_calibration, modifier_reference_date in zip(start_calibrations, modifier_reference_dates):
+
+        # load most recent dataset
+        df = pd.read_parquet(get_most_recent_filename(data_folder))
+
+        # basic cleaning
+        ## convert date column to datetime and fips_state to int
+        df["date"] = pd.to_datetime(df["date"], format="ISO8601")
+        df["fips_state"] = df["fips_state"].astype(int)
+        ## slice out US states of interest
+        if state_fips is not None:
+            df = df[df["fips_state"].isin(state_fips)]
+        ## slice out variables of interest
+        df = df[["date", "fips_state", "influenza admissions"]]
+        ## trim bottom temporally
+        df = df[df["date"] > start_calibration]
+        ## Backward fill per state (Happens first week of season 2024-2025 in 3 states)
+        df["influenza admissions"] = (df.groupby("fips_state")["influenza admissions"].bfill())
+
         # determine the data's end date
-        last_existing_date = df['date'].max()
-        user_end_date = start_calibration+timedelta(weeks=n_observations)
+        last_existing_date = df["date"].max()
+        user_end_date = start_calibration + timedelta(weeks=n_observations)
         if user_end_date <= last_existing_date:
             target_end_date = user_end_date + pd.Timedelta(weeks=forecast_horizon)
         else:
             target_end_date = last_existing_date + pd.Timedelta(weeks=forecast_horizon)
+
         # generate dataframe encompassing calibration + forecast ranges
-        all_dates = pd.date_range(start=df['date'].min(), end=target_end_date, freq='7D')
-        all_fips = df['fips_state'].unique()
-        full_index = pd.MultiIndex.from_product([all_dates, all_fips], names=['date','fips_state'])
-        df = df.set_index(['date', 'fips_state']).reindex(full_index).reset_index()
+        all_dates = pd.date_range(start=df["date"].min(), end=target_end_date, freq="7D")
+        all_fips = df["fips_state"].unique()
+        full_index = pd.MultiIndex.from_product([all_dates, all_fips], names=["date", "fips_state"])
+        df = (df.set_index(["date", "fips_state"]).reindex(full_index).reset_index())
+
         # save the data's time index relative to the forward simulation model's t=0 (per season) + dates
-        dates.append(df['date'].unique())
-        timesteps.append([(d - modifier_reference_date)/timedelta(days=1) for d in df['date'].unique()])
+        unique_dates = df["date"].unique()
+        dates.append(unique_dates)
+        timesteps.append(np.array([(d - modifier_reference_date) / timedelta(days=1) for d in unique_dates]))
+
         # extract the data as a (n_states x n_observations) numpy array
-        data.append(df.pivot(index="fips_state", columns="date", values="influenza admissions").sort_index().sort_index(axis=1).to_numpy())
+        data_matrix = (
+            df.pivot(index="fips_state", columns="date", values="influenza admissions")
+            .sort_index()
+            .sort_index(axis=1)
+            .to_numpy()
+        )
+        data.append(data_matrix)
     # stack data to (n_season, n_states, n_observations)
-    data = np.stack(data, axis=0)
-    dates = np.stack(dates, axis=0)
-    timesteps = np.stack(timesteps, axis=0)
-    
-    return data/7, dates, timesteps
+    data_arr = np.stack(data, axis=0)
+    dates_arr = np.stack(dates, axis=0)
+    timesteps_arr = np.stack(timesteps, axis=0)
+    true_n_observations = len(dt[0]) - forecast_horizon
+
+    # compute the actual number of observations
+    return data_arr, dates_arr, timesteps_arr, true_n_observations
 
 # get the data
-data, dt, ts = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon, state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+data, dt, ts, n_observations = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 
-# compute the actual number of observations
-n_observations = len(dt[0]) - forecast_horizon
+# divide weekly incidence by 7
+data = data / 7
 
 # Get the hyperparameters
 # ~~~~~~~~~~~~~~~~~~~~~~~
@@ -676,7 +846,7 @@ with pm.Model(coords=coords) as model:
     # ------- AR-GARCH modifiers -----------
 
     # Spatial correlation ('psi_spatial_shocks' hyperparameter)
-    W = pt.as_tensor_variable(adj.values)
+    W = pt.as_tensor_variable(adj)
     D = pt.diag(pt.sum(W, axis=1))
     Q_shocks = D - psi_spatial_shocks * W + 1e-6 * pt.eye(n_states)
     L_Q_shocks = pt.slinalg.cholesky(Q_shocks)
@@ -709,11 +879,12 @@ with pm.Model(coords=coords) as model:
     sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims="state")
 
     # Run AR-GARCH scan over T steps
-    (z_seq, sigma2_seq, eps_seq), _ = pytensor.scan(
+    z_seq, sigma2_seq, eps_seq = pytensor.scan(
         fn=step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
         non_sequences=[psi, omega, a_garch, b_garch],
+        return_updates=False
     )
 
     # Register deterministic variables to inspect later
@@ -738,16 +909,11 @@ with pm.Model(coords=coords) as model:
 # Sample pyMC model
 # ~~~~~~~~~~~~~~~~~
 
-n_chains = 6
 with model:
     # run sampler without tuning
-    trace = pm.sample(100, tune=100, chains=n_chains, init='adapt_diag', cores=1, progressbar=True)
+    trace = pm.sample(n_samples, tune=n_tune, chains=n_chains, init='adapt_diag', cores=1, progressbar=True)
 
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
-
-# manual burn
-n_burn = 0
-trace = trace.isel(draw=slice(n_burn, None))
 
 # Generate traces
 variables2plot = ['rho', 'fI', 'fR', 'psi', 'kappa', 'sigma2_0']
@@ -764,14 +930,14 @@ for var in variables2plot:
 
 with model:
 
-    # geometric random walk per state
-    grw_innov = pm.Normal("grw_innov", mu=0, sigma=0.375, shape=(n_states, forecast_horizon))         # tune by LOOCV on WIS (currently set to NC stationary GRW baseline model optimal)
+    # add a geometric random walk per state to simulation output
+    grw_innov = pm.Normal("grw_innov", mu=0, sigma=sigma_grw, shape=(n_states, forecast_horizon))         # tune by LOOCV on WIS (currently set to NC stationary GRW baseline model optimal)
     ys_future_rw = ys[:, :, n_observations:] * pt.exp(pt.cumsum(grw_innov, axis=1)[None, :, :])
 
-    # forecast 
+    # add sampling noise
     pred = pm.NegativeBinomial("pred", mu=ys_future_rw, alpha=1/alpha_inv[None, :, None])
 
-    # sample
+    # sample posterior predictive
     posterior_predictive = pm.sample_posterior_predictive(trace, var_names=["obs", "pred"])
 
 
