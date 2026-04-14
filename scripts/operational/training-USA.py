@@ -101,7 +101,7 @@ adj = adj.loc[state_fips_index['abbreviation_state'].values, state_fips_index['a
 # Get US incidences
 # ~~~~~~~~~~~~~~~~~
 
-def get_data(start_calibrations, modifier_reference_dates, n_observations, state_fips=None):
+def get_data(start_calibrations, modifier_reference_dates, state_fips=None):
     """
     A function formatting the model's input data
 
@@ -143,7 +143,7 @@ def get_data(start_calibrations, modifier_reference_dates, n_observations, state
     return data/7, dates, timesteps
 
 # get the data
-data, dt, ts = get_data(start_calibrations, modifier_reference_dates, n_observations, state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+data, dt, ts = get_data(start_calibrations, modifier_reference_dates, state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 
 # Define a jax-jitted diffrax differential equation model
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
