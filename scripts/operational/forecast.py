@@ -24,10 +24,10 @@ import pytensor.tensor as pt
 # jax and diffrax
 import jax.numpy as jnp
 # model package
-from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data
+from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data, simout_to_hubverse
 from SCARCHhierarchSIR.SIR_model import get_jax_jitted_model, make_sol_op
 from SCARCHhierarchSIR.pymc_model import AR_GARCH_step, compute_season_weights, weighted_nb_logp, weighted_nb_random
-from SCARCHhierarchSIR.preoptimization import preoptimize_parameters, compute_initial_effects
+from SCARCHhierarchSIR.preoptimization import preoptimize_parameters
 
 # all paths defined relative to this file
 abs_dir = os.path.dirname(__file__)
@@ -48,11 +48,11 @@ training_folder = os.path.join(abs_dir, f'../../data/interim/calibration/trainin
 seasons = ['2025-2026',]        # script only works with one season
 n_observations = 52             # use all data available in the forecast season
 forecast_horizon = 4            # forecast 4 weeks ahead
-n_samples = 10
-n_tune = 5
-n_chains = 1
+n_preoptim = 500
+n_sample = 10
+n_tune = 10
+n_chains = 2
 sigma_grw = 0.375
-n_preoptim = 300
 
 # derived products
 ## convert to a list of start and enddates (datetime)
@@ -60,7 +60,6 @@ n_seasons = len(seasons)
 start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
 modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
 ## misc
-assert n_samples > n_tune, 'number of tuning samples cannot exceed total number of samples'
 output_folder = os.path.join(abs_dir, f'../../data/interim/calibration/forecasting/{training_name}')
 
 # Get US demographics
@@ -77,7 +76,7 @@ adj = get_adjacency_matrix(state_fips_index['abbreviation_state'])
 # Get US incidence data
 # ~~~~~~~~~~~~~~~~~~~~~
 
-data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+reference_date, data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=forecast_horizon, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 data = data / 7 # divide weekly incidence by 7
 
 # Get the hyperparameters
@@ -186,7 +185,8 @@ weights = compute_season_weights(data[:,:,:n_observations])
 coords = {
     "state": state_fips_index['abbreviation_state'].values,
     "season": seasons,
-    "modifier": np.arange(n_modifiers)
+    "modifier": np.arange(n_modifiers),
+    "horizon": np.arange(forecast_horizon)
 }
 
 # Build pyMC probablistic model
@@ -289,7 +289,7 @@ with pm.Model(coords=coords) as model:
 
 with model:
     # run sampler without tuning
-    trace = pm.sample(n_samples, tune=n_tune, chains=n_chains, init='adapt_diag', cores=1, progressbar=True)
+    trace = pm.sample(n_sample, tune=n_tune, chains=n_chains, init='adapt_diag', cores=1, progressbar=True)
 
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
 
@@ -309,11 +309,11 @@ for var in variables2plot:
 with model:
 
     # add a geometric random walk per state to simulation output
-    grw_innov = pm.Normal("grw_innov", mu=0, sigma=sigma_grw, shape=(n_states, forecast_horizon))         # tune by LOOCV on WIS (currently set to NC stationary GRW baseline model optimal)
+    grw_innov = pm.Normal("grw_innov", mu=0, sigma=sigma_grw, dims=("state", "horizon"))         # tune by LOOCV on WIS (currently set to NC stationary GRW baseline model optimal)
     ys_future_rw = ys[:, :, n_observations:] * pt.exp(pt.cumsum(grw_innov, axis=1)[None, :, :])
 
     # add sampling noise
-    pred = pm.NegativeBinomial("pred", mu=ys_future_rw, alpha=1/alpha_inv[None, :, None])
+    pred = pm.NegativeBinomial("pred", mu=ys_future_rw, alpha=1/alpha_inv[None, :, None], dims=("season", "state", "horizon"))
 
     # sample posterior predictive
     posterior_predictive = pm.sample_posterior_predictive(trace, var_names=["obs", "pred"])
@@ -357,3 +357,23 @@ for s in range(n_states):
     os.makedirs(os.path.join(output_folder, 'goodness-fit'), exist_ok=True)
     plt.savefig(os.path.join(output_folder,f'goodness-fit/state_{state_fips_index.iloc[s]['fips_state']}_{state_fips_index.iloc[s]['abbreviation_state']}.pdf'))
     plt.close(fig)
+
+# Send simulation output to Hubverse format
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# remove 'seasons' dimension and flatten the 'chain' and 'draw' dimensions into 'draw'
+simout = posterior_predictive.posterior_predictive['pred']
+simout = simout.sel(season=seasons).squeeze("season", drop=True)
+simout = (simout.stack(sample=("chain", "draw")).reset_index("sample", drop=True).rename({"sample": "draw"}))
+simout = simout.assign_coords(draw=np.arange(simout.sizes["draw"]))
+
+# convert to hubverse format
+hv_out = simout_to_hubverse(simout,
+                            reference_date, 
+                            dict(zip(state_fips_index["abbreviation_state"], state_fips_index["fips_state"])),
+                            target='wk inc flu hosp',
+                            quantiles=False)
+
+# save result
+hv_out.to_csv(os.path.join(output_folder, reference_date.strftime('%Y-%m-%d')+'-JHU_Cornell'+'-'+'SCARCHhierarchSIR.csv'), index=False)
+

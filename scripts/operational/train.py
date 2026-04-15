@@ -48,7 +48,7 @@ start_calibration_month = 10
 seasons = ['2023-2024', '2024-2025', '2025-2026']
 ## sampling effort
 n_chains = 1
-n_samples = 2
+n_sample = 2
 n_burn = 0
 training_name = 'exclude_None'
 n_preoptim = 1000
@@ -59,7 +59,7 @@ n_seasons = len(seasons)
 start_calibrations = [datetime(int(season[0:4]), start_calibration_month, 1) for season in seasons]
 modifier_reference_dates = [datetime(int(season[0:4]), 10, 15) for season in seasons]
 ## misc
-assert n_samples > n_burn, 'number of burned samples cannot exceed total number of samples'
+assert n_sample > n_burn, 'number of burned samples cannot exceed total number of samples'
 output_folder = os.path.join(abs_dir, f'../../data/interim/calibration/training/{training_name}')
 
 # Get US demographics
@@ -76,7 +76,7 @@ adj = get_adjacency_matrix(state_fips_index['abbreviation_state'])
 # Get US incidences
 # ~~~~~~~~~~~~~~~~~
 
-data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=None, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+reference_date, data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=None, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 data = data / 7 # divide weekly incidence by 7
 
 # Define a jax-jitted diffrax differential equation model
@@ -305,7 +305,7 @@ with model:
     # set step size directly
     step = pm.NUTS(step_scale=0.002, target_accept=0.8, max_treedepth=12)   # for US: step_scale: 0.002 + max_treedepth 12
     # run sampler without tuning
-    trace = pm.sample(n_samples, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
+    trace = pm.sample(n_sample, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
                         initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': init["delta_beta_mu"] / 0.25,
                                   'log_rho_global_mean': init["log_rho"]["global"], 'rho_state_sd': 0.2, 'rho_state_raw': init["log_rho"]["state"] / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': init["log_rho"]["season"] / 0.2,
                                   'log_fI_global_mean': init["log_fI"]["global"], 'fI_state_sd': 0.2, 'fI_state_raw': init["log_fI"]["state"] / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': init["log_fI"]["season"] / 0.2,
