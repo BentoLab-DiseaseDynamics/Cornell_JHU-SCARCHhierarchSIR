@@ -23,9 +23,7 @@ import pytensor.tensor as pt
 #pytensor.config.cxx = '/usr/bin/clang++'
 #pytensor.config.on_opt_error = "ignore"
 # jax and diffrax
-import jax
 import jax.numpy as jnp
-import optax
 # model package
 from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data
 from SCARCHhierarchSIR.SIR_model import get_jax_jitted_model, make_sol_op
