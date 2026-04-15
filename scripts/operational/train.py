@@ -10,14 +10,11 @@ Licensed under CC BY-NC-SA 4.0
 
 # standard python libraries
 import os
-import re
 import numpy as np
 import pandas as pd
-from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime, timedelta
-from typing import Iterable, Optional, Tuple, List
+from datetime import datetime
 # pyMC / pytensor
 import pymc as pm
 import arviz
@@ -25,14 +22,14 @@ import pytensor
 import pytensor.tensor as pt
 #pytensor.config.cxx = '/usr/bin/clang++'
 #pytensor.config.on_opt_error = "ignore"
-from pytensor.graph import Apply, Op
-from pytensor.link.jax.dispatch import jax_funcify
 # jax and diffrax
-import jax
 import jax.numpy as jnp
-from jax.scipy.signal import convolve
-import diffrax
-import optax
+# model package
+from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data
+from SCARCHhierarchSIR.SIR_model import get_jax_jitted_model, make_sol_op
+from SCARCHhierarchSIR.pymc_model import AR_GARCH_step, compute_season_weights, weighted_nb_logp, weighted_nb_random
+from SCARCHhierarchSIR.preoptimization import preoptimize_parameters, compute_initial_effects
+
 
 # all paths defined relative to this file
 abs_dir = os.path.dirname(__file__)
@@ -54,7 +51,7 @@ n_chains = 1
 n_samples = 2
 n_burn = 0
 training_name = 'exclude_None'
-n_preoptim = 15000
+n_preoptim = 1000
 
 # derived products
 ## convert to a list of start and enddates (datetime)
@@ -68,535 +65,33 @@ output_folder = os.path.join(abs_dir, f'../../data/interim/calibration/training/
 # Get US demographics
 # ~~~~~~~~~~~~~~~~~~~
 
-def get_demography(regions: Optional[Iterable[str]]=None) -> Tuple[pd.DataFrame, np.ndarray]:
-    """
-    Load and optionally filter state-level demographic data.
-
-    Parameters
-    ----------
-    regions : Optional[Iterable[str]], default=None
-        Iterable of region names to filter on (matching `region_name` column in `~/data/interim/demography/demography.csv`).
-        If None, all regions are included.
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, np.ndarray]
-        state_fips_index : pd.DataFrame
-            DataFrame with columns:
-            ['abbreviation_state', 'name_state', 'fips_state'].
-        demography : np.ndarray
-            Array of population counts corresponding to the returned states.
-    """
-
-    demo = pd.read_csv(
-        os.path.join(abs_dir, "../../data/interim/demography/demography.csv")
-    )
-
-    if regions is not None:
-        demo = demo[demo["region_name"].isin(regions)]
-
-    state_fips_index = demo[
-        ["abbreviation_state", "name_state", "fips_state"]
-    ]
-
-    demography = demo["population"].to_numpy()
-
-    return state_fips_index, demography
-
 state_fips_index, demo = get_demography(regions)
 n_states = len(demo)
 
 # Get state adjacency matrix
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def get_adjacency_matrix(abbreviation_state: Iterable[str]) -> pd.DataFrame:
-    """
-    Load and subset the state adjacency matrix to the specified states.
-
-    Parameters
-    ----------
-    abbreviation_state : list
-        List containing state abbreviations.
-        The ordering of this list determines the ordering of the
-        returned adjacency matrix.
-
-    Returns
-    -------
-    np.ndarray
-        Square adjacency matrix indexed and columned by state abbreviations,
-    """
-
-    adj = pd.read_csv(
-        os.path.join(abs_dir, "../../data/interim/geography/adjacency_matrix.csv"),
-        index_col=0,
-    )
-
-    return adj.loc[abbreviation_state, abbreviation_state].values
-
 adj = get_adjacency_matrix(state_fips_index['abbreviation_state'])
 
 # Get US incidences
 # ~~~~~~~~~~~~~~~~~
 
-def extract_timestamp(fname: Path, pattern: re.Pattern[str]) -> Optional[datetime]:
-    """
-    Extract a timestamp from the NHSN HRD data filenames using a regex pattern.
-
-    The filename is expected to contain a single capturing group corresponding
-    to a timestamp formatted as "%Y-%m-%d-%H-%M-%S".
-
-    Parameters
-    ----------
-    fname : Path
-        File path whose name will be searched.
-    pattern : re.Pattern[str]
-        Compiled regex pattern with one capturing group for the timestamp.
-
-    Returns
-    -------
-    Optional[datetime]
-        Parsed datetime if a match is found, otherwise None.
-    """
-    match = pattern.search(fname.name)
-    if match:
-        return datetime.strptime(match.group(1), "%Y-%m-%d-%H-%M-%S")
-    return None
-
-def get_most_recent_filename(data_folder: Path) -> Path:
-    """
-    Retrieve the most recent NHSN HRD parquet file path in a folder based on timestamps embedded in the filenames.
-
-    Filenames are expected to contain the pattern:
-    'gathered-YYYY-MM-DD-HH-MM-SS*.parquet.gzip'.
-
-    Parameters
-    ----------
-    data_folder : Path
-        Directory containing parquet files.
-
-    Returns
-    -------
-    Path
-        Path to the most recent file.
-
-    Raises
-    ------
-    ValueError
-        If no valid timestamped files are found.
-    """
-    pattern = re.compile(r"gathered-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
-
-    files_with_time: List[Tuple[Path, Optional[datetime]]] = [
-        (f, extract_timestamp(f, pattern))
-        for f in data_folder.glob("*.parquet.gzip")
-    ]
-
-    files_with_time = [(f, t) for f, t in files_with_time if t is not None]
-
-    if not files_with_time:
-        raise ValueError(f"No valid timestamped files found in {data_folder}")
-
-    latest_file, _ = max(files_with_time, key=lambda x: x[1])
-    return latest_file
-
-
-def get_data(
-    start_calibrations: Iterable[pd.Timestamp],
-    modifier_reference_dates: Iterable[pd.Timestamp],
-    n_observations: int,
-    type: str = "preliminary_backfilled",
-    forecast_horizon: int = None,
-    state_fips: Optional[Iterable[int]] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Format influenza hospitalization data for model input.
-
-    Parameters
-    ----------
-    start_calibrations : Iterable[pd.Timestamp]
-        Start date of calibration period for each season.
-    modifier_reference_dates : Iterable[pd.Timestamp]
-        Reference dates defining t=0 for each season's time index.
-    n_observations : int
-        Number of weekly observations used for calibration.
-    type : str, default="preliminary_backfilled"
-        Data source type. Must be either:
-        - "preliminary"
-        - "preliminary_backfilled"
-    forecast_horizon : int or None
-        Number of weeks to extend beyond observed data for forecasting.
-        Use 'None' for training (default)
-    state_fips : Optional[Iterable[int]], default=None
-        List of state FIPS codes to include. If None, all states are used.
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray, np.ndarray]
-        data : np.ndarray
-            Shape: (n_seasons, n_states, n_timepoints), weekly admissions (scaled by 1/7).
-        dates : np.ndarray
-            Shape: (n_seasons, n_timepoints), datetime values.
-        timesteps : np.ndarray
-            Shape: (n_seasons, n_timepoints), time in days since model's reference date (t=0; October 15).
-        true_n_observations: int
-            The available number of observations (input `n_observations` can exceed the available data).
-
-    Raises
-    ------
-    ValueError
-        If an invalid data type is provided.
-    
-    Notes
-    -----
-    n_seasons should be equal to one for forecasting
-    """
-
-    # determine type of data to use
-    if type == "preliminary":
-        data_folder = Path(abs_dir) / "../../data/interim/cases/NHSN-HRD_archive/preliminary/"
-    elif type == "preliminary_backfilled":
-        data_folder = Path(abs_dir) / "../../data/interim/cases/NHSN-HRD_archive/preliminary_backfilled/"
-    else:
-        raise ValueError("`type` must be 'preliminary' or 'preliminary_backfilled'.")
-    # determine if training or forecasting
-    if forecast_horizon:
-        assert len(start_calibrations) == len(modifier_reference_dates) == 1, 'length of `start_calibrations` and `modifier_reference_dates` must be equal to one when using this function for forecasting'
-
-    data: List[np.ndarray] = []
-    dates: List[np.ndarray] = []
-    timesteps: List[np.ndarray] = []
-
-    for start_calibration, modifier_reference_date in zip(start_calibrations, modifier_reference_dates):
-
-        # load most recent dataset
-        df = pd.read_parquet(get_most_recent_filename(data_folder))
-
-        # basic cleaning
-        ## convert date column to datetime and fips_state to int
-        df["date"] = pd.to_datetime(df["date"], format="ISO8601")
-        df["fips_state"] = df["fips_state"].astype(int)
-        ## slice out US states of interest
-        if state_fips is not None:
-            df = df[df["fips_state"].isin(state_fips)]
-        ## slice out variables of interest
-        df = df[["date", "fips_state", "influenza admissions"]]
-        ## trim bottom temporally
-        df = df[df["date"] > start_calibration]
-        ## Backward fill per state (Happens first week of season 2024-2025 in 3 states)
-        df["influenza admissions"] = (df.groupby("fips_state")["influenza admissions"].bfill())
-
-        # determine the data's end date
-        user_end_date = start_calibration + timedelta(weeks=n_observations)
-        if forecast_horizon:
-            # assume 'forecasting' mode, only one season, number of observations can exceed the end of the data
-            last_existing_date = df["date"].max()
-            if user_end_date <= last_existing_date:
-                target_end_date = user_end_date + pd.Timedelta(weeks=forecast_horizon)
-            else:
-                target_end_date = last_existing_date + pd.Timedelta(weeks=forecast_horizon)
-        else:
-            # assume 'training' mode, more than one season, number of observations in each season must be identical
-            target_end_date = user_end_date
-
-        # generate dataframe encompassing calibration + forecast ranges
-        all_dates = pd.date_range(start=df["date"].min(), end=target_end_date, freq="7D")
-        all_fips = df["fips_state"].unique()
-        full_index = pd.MultiIndex.from_product([all_dates, all_fips], names=["date", "fips_state"])
-        df = (df.set_index(["date", "fips_state"]).reindex(full_index).reset_index())
-
-        # save the data's time index relative to the forward simulation model's t=0 (per season) + dates
-        unique_dates = df["date"].unique()
-        dates.append(unique_dates)
-        timesteps.append(np.array([(d - modifier_reference_date) / timedelta(days=1) for d in unique_dates]))
-
-        # extract the data as a (n_states x n_observations) numpy array
-        data_matrix = (
-            df.pivot(index="fips_state", columns="date", values="influenza admissions")
-            .sort_index()
-            .sort_index(axis=1)
-            .to_numpy()
-        )
-        data.append(data_matrix)
-    # stack data to (n_season, n_states, n_observations)
-    data_arr = np.stack(data, axis=0)
-    dates_arr = np.stack(dates, axis=0)
-    timesteps_arr = np.stack(timesteps, axis=0)
-
-    # compute the actual number of observations
-    if forecast_horizon:
-        n_observations = len(timesteps_arr[0]) - forecast_horizon
-
-    return data_arr, dates_arr, timesteps_arr, n_observations
-
-# get the data
-data, dt, ts, n_observations = get_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=None, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
-
-# divide weekly incidence by 7
-data = data / 7
-
+data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=None, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
+data = data / 7 # divide weekly incidence by 7
 
 # Define a jax-jitted diffrax differential equation model
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# define delta_beta[t] modifier function
-def make_delta_beta_daily(delta_beta, duration, t0, t1, sigma=2.5):
-    """
-    Parameters
-    ----------
-    delta_beta : array (K,)
-        Modifier values for each block.
-    duration : int
-        Number of days each entry is repeated.
-    t0 : int
-        Start day of the simulation (can be negative).
-    t1 : int
-        End day of the simulation (may exceed total expanded length).
-    sigma: float
-        Standard deviation of the Gausian filter.
-
-    Returns
-    -------
-    vec : 2D array, shape: 2 x (t1 - t0)
-        First row: Timesteps.
-        Second row: Delta_beta(t) series with zero-padding outside support.
-    """
-
-    # Total support length = len(delta_beta) * duration
-    total_len = delta_beta.shape[0]* duration
-
-    # Indices of simulation range
-    ts = jnp.arange(t0, t1)
-
-    # Compute block boundaries
-    # block i covers [i*duration , (i+1)*duration - 1]
-    block_ids = jnp.floor_divide(ts, duration).astype(jnp.int32)
-
-    # Mask: valid only if in range
-    valid = (ts >= 0) & (ts < total_len)
-
-    # Gather values, using mod-safe indexing (will be masked out anyway)
-    expanded = jnp.where(valid, delta_beta[block_ids], 0.0)
-
-    # Smooth with a guassian filter
-    x = jnp.linspace(-7, 7, num=15)
-    kern = jnp.exp(-0.5 * (x/sigma)**2)
-    kern = kern / kern.sum()
-    expanded = convolve(expanded, kern, mode="same")
-
-    return jnp.stack([ts, expanded])
-
-# define ODE rhs
-def SIR_vector_field(t, y, args):
-    # unpack states and parameters
-    S, I, R, H = y
-    beta, delta_beta_daily, gamma, rho = args
-    # prevent negative state values due to rounding errors
-    S = jax.nn.softplus(S)
-    I = jax.nn.softplus(I)
-    R = jax.nn.softplus(R)
-    H = jax.nn.softplus(H)
-    # compute total population
-    N = S + I + R
-    # get modifier
-    delta_beta = 1 + jnp.interp(t, xp=delta_beta_daily[0,:], fp=delta_beta_daily[1,:])
-    # compute state derivatives
-    FOI = delta_beta * beta * I / N
-    dS = - S * FOI
-    dI = S * FOI - gamma * I
-    dR = gamma * I
-    # observation
-    dH = rho * S * FOI - H
-    return jnp.array([dS, dI, dR, dH])
-
-# build jax model wrapper
-def stop_gradients(x):
-    return jax.tree.map(jax.lax.stop_gradient, x)
-
-def sol_op_jax(args_diff, args_nodiff, args_static):
-    # unpack differentiable parameters
-    beta = args_diff[0]
-    rho = args_diff[1]
-    fI = args_diff[2]
-    fR = args_diff[3]
-    delta_beta = args_diff[4:]
-    # unpack non-differentiable parameters and block their gradients
-    args_nodiff = stop_gradients(args_nodiff)
-    gamma = args_nodiff[0]
-    population = args_nodiff[1]
-    ts = args_nodiff[2:]
-    # unpack static arguments
-    t0, t1_max, modifier_length = args_static
-    # evaluate modifiers
-    delta_beta_daily = make_delta_beta_daily(delta_beta, modifier_length, t0, t1_max)
-    # wrap ODE rhs
-    term = diffrax.ODETerm(SIR_vector_field)
-    # solve ODE
-    sol = diffrax.diffeqsolve(
-        term,
-        diffrax.Tsit5(),
-        t0=t0,
-        t1=t1_max,
-        dt0=0.1,
-        y0=population * jnp.array([1-fI-fR, fI, fR, 0]),
-        args = (beta, delta_beta_daily, gamma, rho),
-        saveat=diffrax.SaveAt(ts=list(ts)),
-        stepsize_controller=diffrax.PIDController(rtol=1e-4, atol=1e-4)
-    )
-    return sol.ys[:,-1] # return observed state only
-
-
-# Vectorized multi-season solver ------------------------------
-
-def sol_op_single(args_diff, args_nodiff, args_static):
-    """Wrapper for sol_op_jax to allow vmap."""
-    return sol_op_jax(args_diff, args_nodiff, args_static)
-
-# jit the inner ODE model
-sol_op_single_jit = jax.jit(sol_op_single, static_argnums=2)
-
-# vmap across the states
-state_vmapped = jax.vmap(
-    sol_op_single,
-    in_axes=(0,0,None),
-    out_axes=0
-)
-
-# vmap the vmapped states
-sol_op_multi = jax.vmap(
-    state_vmapped,
-    in_axes=(0,0,None),
-    out_axes=0
-)
-
-# jit again
-jitted_sol_op_multi = jax.jit(sol_op_multi, static_argnums=2)
-
-# Define jax VJP (gradient computation) function
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-def single_vjp(ad, g, an, args_static):
-    _, pullback = jax.vjp(
-        lambda th: sol_op_jax(th, an, args_static),
-        ad
-    )
-    return pullback(g)[0]
-
-
-def vjp_sol_op_multi(args_diff, gz, args_nodiff, args_static):
-
-    state_vjp = jax.vmap(
-        single_vjp,
-        in_axes=(0,0,0,None)
-    )
-
-    season_vjp = jax.vmap(
-        state_vjp,
-        in_axes=(0,0,0,None)
-    )
-
-    return season_vjp(args_diff, gz, args_nodiff, args_static)
-
-# jit the gradient 
-jitted_vjp_sol_op_multi = jax.jit(vjp_sol_op_multi, static_argnums=3)
+jitted_sol_op_multi, jitted_vjp_sol_op_multi = get_jax_jitted_model()
 
 # Define the Op and VJPOp classes for the ODE problem
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-class SolOp(Op):
-    def __init__(self, args_static):
-        self.args_static = args_static
-        self.vjp_sol_op = VJPSolOp(args_static)
-
-    def make_node(self, args_diff, args_nodiff):
-        args_diff = pt.as_tensor_variable(args_diff)
-        args_nodiff = pt.as_tensor_variable(args_nodiff)
-        return Apply(self, [args_diff, args_nodiff], [pt.tensor3()])
-
-    def perform(self, node, inputs, outputs):
-        args_diff, args_nodiff = inputs
-        ys = jitted_sol_op_multi(args_diff, args_nodiff, self.args_static)
-        outputs[0][0] = np.asarray(ys, dtype=np.float64)
-
-    def grad(self, inputs, output_grads):
-        args_diff, args_nodiff = inputs
-        (gz,) = output_grads
-
-        grad_wrt_args_diff = self.vjp_sol_op(args_diff, gz, args_nodiff)
-        grad_wrt_args_nodiff = pt.zeros_like(args_nodiff)  # block gradients
-
-        return [grad_wrt_args_diff, grad_wrt_args_nodiff]
-
-
-class VJPSolOp(Op):
-    def __init__(self, args_static):
-        self.args_static = args_static
-
-    def make_node(self, args_diff, gz, args_nodiff):
-        return Apply(self, [
-            pt.as_tensor_variable(args_diff),   
-            pt.as_tensor_variable(gz),         
-            pt.as_tensor_variable(args_nodiff)  
-        ], [pt.tensor3()])                      
-
-    def perform(self, node, inputs, outputs):
-        args_diff, gz, args_nodiff = inputs
-        # Use the new batched VJP
-        grad = jitted_vjp_sol_op_multi(args_diff, gz, args_nodiff, self.args_static)
-        # Convert to NumPy array for Theano
-        outputs[0][0] = np.asarray(grad, dtype=np.float64)
-
-# Register with jax
-# ~~~~~~~~~~~~~~~~~
-
-@jax_funcify.register(SolOp)
-def sol_op_jax_funcify(op, **kwargs):
-    return lambda args_diff, args_nodiff: jitted_sol_op_multi(args_diff, args_nodiff, op.args_static)
-
-@jax_funcify.register(VJPSolOp)
-def vjp_sol_op_jax_funcify(op, **kwargs):
-    return lambda args_diff, gz, args_nodiff: jitted_vjp_sol_op_multi(args_diff, gz, args_nodiff, op.args_static)
-
-
-# Register with pyMC
-# ~~~~~~~~~~~~~~~~~~
-
-# static arguments
 args_static = (start_simulation, max(ts[:,-1]), modifier_length)
-
-# Compile forward simulation model
-sol_op = SolOp(args_static)
-vjp_sol_op = VJPSolOp(args_static)
-
+sol_op = make_sol_op(args_static, jitted_sol_op_multi, jitted_vjp_sol_op_multi)
 
 # Pre-optimize the forward simulation model's parameters
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-# args diff initial guesses (ballpark estimates)
-beta = 0.455
-rho = 0.0025
-fI = 1e-4
-fR = 0.25
-delta_beta_vals = jnp.zeros(n_modifiers)
-
-# compute gradient-safe transformations
-args_diff = jnp.concatenate([
-                jnp.array([jnp.log(jnp.exp(beta) - 1), jnp.log(jnp.exp(rho) - 1), jnp.log(jnp.exp(fI) - 1), jnp.log(fR / (1 - fR))]),
-                jnp.arctanh(delta_beta_vals / 0.25)
-            ])
-args_diff = jnp.expand_dims(args_diff, 0).repeat(n_seasons, axis=0)
-
-# construct initial differentiable arguments vector
-## gradient safe transforms
-single_args_diff = jnp.concatenate([
-    jnp.array([jnp.log(jnp.exp(beta)-1),           # beta
-               jnp.log(jnp.exp(rho)-1),          # rho
-               jnp.log(jnp.exp(fI)-1),            # fI
-               jnp.log(fR / (1 - fR))]),         # fR
-    jnp.arctanh(delta_beta_vals / 0.25)            # delta_beta
-])   # shape: (4 + n_modifiers,)
-## broadcast across seasons and states
-args_diff = jnp.broadcast_to(single_args_diff, (n_seasons, n_states, single_args_diff.shape[0])) # shape: (n_seasons, n_states, n_params)
-
 
 # stack args_nodiff so two leading axes are seasons, states and the third axes gives the arguments for the season-state combination
 gamma_vec = jnp.full((n_seasons, n_states, 1), gamma)
@@ -604,39 +99,28 @@ pop_mat = jnp.broadcast_to(jnp.asarray(demo)[None, :, None], (n_seasons, n_state
 ts_mat = jnp.broadcast_to(ts[:, None, :], (n_seasons, n_states, ts.shape[1]))
 args_nodiff = np.array(jnp.concatenate([gamma_vec, pop_mat, ts_mat], axis=2))     # shape: (n_seasons, n_states, )  --> convert to numpy otherwise error in pt.as_tensor_variable(args_nodiff) in make_node of pyMC model
 
-# define SSE likelihood
-def neg_log_likelihood(args_diff):
-    # 1. convert back to untransformed values
-    block_1 = jax.nn.softplus(args_diff[:, :, 0:3])        # beta, rho, fI
-    block_2 = jax.nn.sigmoid(args_diff[:, :, 3:4])         # fR
-    block_3 = 0.25 * jnp.tanh(args_diff[:, :, 4:])         # delta_beta
-    # 2. pack blocks into args_diff
-    args_diff = jnp.concatenate([block_1, block_2, block_3], axis=2)
-    # 3. run simulation
-    pred = jitted_sol_op_multi(args_diff, args_nodiff, args_static)
-    # 4. compute SSE loss
-    return jnp.sum((data - pred)**2)
-
-# optimize
-optimizer = optax.adam(1e-2)
-opt_state = optimizer.init(args_diff)
-for i in range(n_preoptim):
-    loss, grads = jax.value_and_grad(neg_log_likelihood)(args_diff)
-    updates, opt_state = optimizer.update(grads, opt_state)
-    args_diff = optax.apply_updates(args_diff, updates)
-    if i % 100 == 0:
-        print(i+100, float(loss))
-
-# convert back to untransformed values
-block_1 = jax.nn.softplus(args_diff[:, :, 0:3])         # beta, rho, fI
-block_2 = jax.nn.sigmoid(args_diff[:, :, 3:4])          # fR
-block_3 = 0.25 * jnp.tanh(args_diff[:, :, 4:])          # delta_beta
-args_diff = jnp.concatenate([block_1, block_2, block_3], axis=2)  # also back to numpy otherwise initial point will fail
+# pre-optimize the initial guesses
+args_diff_preoptim = preoptimize_parameters(
+    jitted_sol_op=jitted_sol_op_multi,
+    args_static=args_static,
+    args_nodiff=args_nodiff,
+    data=data,
+    init_params=dict(
+        beta=0.455,
+        rho=0.0025,
+        fI=1e-4,
+        fR=0.25,
+        delta_beta=jnp.zeros(n_modifiers),
+    ),
+    n_seasons=n_seasons,
+    n_states=n_states,
+    n_iter=n_preoptim,
+)
 
 # run simulation
-out = jitted_sol_op_multi(args_diff, args_nodiff, args_static)
+out = jitted_sol_op_multi(args_diff_preoptim, args_nodiff, args_static)
 
-# inspect result
+# visualise the result
 for s in range(n_states):
     fig, ax = plt.subplots(nrows=1, figsize=(8.7, 11.3/4))
     for i in range(n_seasons):
@@ -648,128 +132,28 @@ for s in range(n_states):
     plt.savefig(os.path.join(output_folder,f'initial-optim/state_{state_fips_index.iloc[s]['fips_state']}_{state_fips_index.iloc[s]['abbreviation_state']}.pdf'))
     plt.close(fig)
 
-# store 2D vector per variable so we can start the chains easily: shape: (n_seasons, n_states)
-beta_opt = np.array(args_diff[:,:,0])
-rho_opt = np.array(args_diff[:,:,1])
-fI_opt = np.array(args_diff[:,:,2])
-fR_opt = np.array(args_diff[:,:,3])
-delta_beta_opt = np.array(args_diff[:,:,4:])
-delta_beta_mu_opt = np.transpose(np.mean(delta_beta_opt, axis=0))
+# compute pyMC initial effect sizes
+init = compute_initial_effects(args_diff_preoptim)
 
-# transform into estimates of global, state and season effects
-## rho
-log_rho_opt = np.log(rho_opt)
-log_rho_global_init = np.mean(log_rho_opt) # global mean
-rho_state_init = np.mean(log_rho_opt, axis=0) - log_rho_global_init # state effects (average across seasons, zero-mean)
-rho_season_init = np.mean(log_rho_opt, axis=1) - log_rho_global_init # season effects (average across states, zero-mean)
-reconstructed = log_rho_global_init + rho_state_init[None, :] + rho_season_init[:, None]
-print("Mean log-rho:", log_rho_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - log_rho_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - log_rho_opt).max())
-## fI
-log_fI_opt = np.log(fI_opt)
-log_fI_global_init = np.mean(log_fI_opt) # global mean
-fI_state_init = np.mean(log_fI_opt, axis=0) - log_fI_global_init # state effects (average across seasons, zero-mean)
-fI_season_init = np.mean(log_fI_opt, axis=1) - log_fI_global_init # season effects (average across states, zero-mean)
-reconstructed = log_fI_global_init + fI_state_init[None, :] + fI_season_init[:, None]
-print("Mean log-fI:", log_fI_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - log_fI_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - log_fI_opt).max())
-## fR
-from scipy.special import logit
-logit_fR_opt = logit(fR_opt)
-logit_fR_global_init = np.mean(logit_fR_opt) # global mean
-fR_state_init = np.mean(logit_fR_opt, axis=0) - logit_fR_global_init # state effects (average across seasons, zero-mean)
-fR_season_init = np.mean(logit_fR_opt, axis=1) - logit_fR_global_init # season effects (average across states, zero-mean)
-reconstructed = logit_fR_global_init + fR_state_init[None, :] + fR_season_init[:, None]
-print("Mean logit-fR:", logit_fR_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - logit_fR_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - logit_fR_opt).max())
+print("Mean log-rho:", init["log_rho"]["global"])
+print("Mean reconstruction error:", init["log_rho"]["error_mean"])
+print("Max reconstruction error:", init["log_rho"]["error_max"])
+
+print("Mean log-fI:", init["log_fI"]["global"])
+print("Mean reconstruction error:", init["log_fI"]["error_mean"])
+print("Max reconstruction error:", init["log_fI"]["error_max"])
+
+print("Mean logit-fR:", init["logit_fR"]["global"])
+print("Mean reconstruction error:", init["logit_fR"]["error_mean"])
+print("Max reconstruction error:", init["logit_fR"]["error_max"])
 
 # Build tempored NB distribution
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# computed tempered likelihood weights
-def compute_season_weights(data):
-    """
-    Compute weights so each season-state contributes equally.
-
-    Parameters
-    ----------
-    data : ndarray (n_seasons, n_states, n_observations)
-
-    Returns
-    -------
-    weights : np.ndarray, shape (n_seasons, n_states, 1)
-    """
-    # max over observations per season-state
-    max_per_season_state = np.sqrt(data.mean(axis=2))
-    inv_max = 1.0 / max_per_season_state
-    # normalize to mean 1
-    normalized = inv_max / inv_max.mean()
-    # expand dims for broadcasting across observations
-    return normalized[:, :, None]
-
 weights = compute_season_weights(data)
-
-
-# tempered negative binomial likelihood
-def weighted_nb_logp(value, mu, alpha, weights):
-    """
-    Weighted Negative Binomial log-probability.
-
-    Parameters
-    ----------
-    value : observed counts
-        shape (n_seasons, n_states, observations)
-
-    mu : predicted mean
-        shape (n_seasons, n_states, observations)
-
-    alpha : NB dispersion parameter
-        shape (n_states,)
-
-    weights : season weights
-        shape (n_seasons, n_states, 1)
-    """
-
-    # move state axis to the end so alpha (n_states,) broadcasts correctly
-    mu = mu.dimshuffle(0, 2, 1)
-    value = value.dimshuffle(0, 2, 1)
-    weights = weights.dimshuffle(0, 2, 1)
-
-    return pt.sum(weights * pm.logp(pm.NegativeBinomial.dist(mu=mu, alpha=alpha), value))
-
-def weighted_nb_random(*args, rng=None, size=None):
-    """
-    Random draws from Negative Binomial for posterior predictive.
-    weights are ignored during random draws
-    """
-    # mu, alpha: tensors -> convert to numpy
-    mu_ = np.array(args[0])
-    alpha_ = 1/np.array(args[1])
-
-    # remove pyMC broadcast axes
-    alpha_ = alpha_.reshape(-1)
-
-    # broadcast to mu
-    alpha_ = alpha_[None, :, None]
-
-    # size: PyMC passes shape of batch/draws
-    return rng.negative_binomial(n=1/alpha_, p=1/(1 + mu_ * alpha_), size=size)
-
 
 # Build pyMC model
 # ~~~~~~~~~~~~~~~~
-
-# AR(1)-GARCH(1,1) step function
-def step(eta_t, prev_z, prev_sigma2, prev_eps, psi, omega, a_garch, b_garch):
-    # --- GARCH(1,1) short-term shocks innovation scale ---
-    sigma2 = omega + a_garch * (prev_eps ** 2) + b_garch * prev_sigma2
-    eps = eta_t * pt.sqrt(sigma2)
-    # --- AR(1) short-term shocks ---
-    z = psi * prev_z + eps
-    return z, sigma2, eps
 
 # construct coordinates
 coords = {
@@ -788,7 +172,7 @@ with pm.Model(coords=coords) as model:
 
     ## ascertainment: rho
     ### global
-    log_rho_global_mean = pm.Normal("log_rho_global_mean", mu=np.log(np.mean(rho_opt)), sigma=1/3)    
+    log_rho_global_mean = pm.Normal("log_rho_global_mean", mu=init["log_rho"]["global"], sigma=1/3)    
     rho_global_mean = pm.Deterministic("rho_global_mean", pt.exp(log_rho_global_mean))
     ### state
     rho_state_sd = pm.HalfNormal("rho_state_sd", sigma=1/5)      
@@ -803,7 +187,7 @@ with pm.Model(coords=coords) as model:
 
     ## initial infected: fI
     ### global
-    log_fI_global_mean = pm.Normal("log_fI_global_mean", mu=np.log(np.mean(fI_opt)), sigma=1/3)    
+    log_fI_global_mean = pm.Normal("log_fI_global_mean", mu=init["log_fI"]["global"], sigma=1/3)    
     fI_global_mean = pm.Deterministic("fI_global_mean", pt.exp(log_fI_global_mean))
     ### state
     fI_state_sd = pm.HalfNormal("fI_state_sd", sigma=1/5)      
@@ -887,7 +271,7 @@ with pm.Model(coords=coords) as model:
 
     # Run AR-GARCH scan over T steps
     z_seq, sigma2_seq, eps_seq = pytensor.scan(
-        fn=step,
+        fn=AR_GARCH_step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
         non_sequences=[psi, omega, a_garch, b_garch],
@@ -922,10 +306,10 @@ with model:
     step = pm.NUTS(step_scale=0.002, target_accept=0.8, max_treedepth=12)   # for US: step_scale: 0.002 + max_treedepth 12
     # run sampler without tuning
     trace = pm.sample(n_samples, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
-                        initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': delta_beta_mu_opt / 0.25,
-                                  'log_rho_global_mean': log_rho_global_init, 'rho_state_sd': 0.2, 'rho_state_raw': rho_state_init / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': rho_season_init / 0.2,
-                                  'log_fI_global_mean': log_fI_global_init, 'fI_state_sd': 0.2, 'fI_state_raw': fI_state_init / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': fI_season_init / 0.2,
-                                  'logit_fR_global_mean': logit_fR_global_init, 'fR_state_sd': 0.2, 'fR_state_raw': fR_state_init / 0.2, 'fR_season_sd': 0.2, 'fR_season_raw': fR_season_init / 0.2,
+                        initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': init["delta_beta_mu"] / 0.25,
+                                  'log_rho_global_mean': init["log_rho"]["global"], 'rho_state_sd': 0.2, 'rho_state_raw': init["log_rho"]["state"] / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': init["log_rho"]["season"] / 0.2,
+                                  'log_fI_global_mean': init["log_fI"]["global"], 'fI_state_sd': 0.2, 'fI_state_raw': init["log_fI"]["state"] / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': init["log_fI"]["season"] / 0.2,
+                                  'logit_fR_global_mean': init["logit_fR"]["global"], 'fR_state_sd': 0.2, 'fR_state_raw': init["logit_fR"]["state"] / 0.2, 'fR_season_sd': 0.2, 'fR_season_raw': init["logit_fR"]["season"] / 0.2,
                                   'logit_psi_global_mean': 0.75, 'logit_kappa_global_mean': 0.75}])
        
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
@@ -969,6 +353,9 @@ with model:
 # Save traces and posterior predictive
 arviz.to_netcdf(trace, os.path.join(output_folder,"trace.nc"))
 arviz.to_netcdf(posterior_predictive, os.path.join(output_folder,"posterior_predictive.nc"))
+
+# Visualisations
+# ~~~~~~~~~~~~~~
 
 # Visualise across-season modifier trend + within-season median per state
 os.makedirs(os.path.join(output_folder,'modifiers'), exist_ok=True)
@@ -1080,6 +467,9 @@ for n, p_state, p_season, g, p, e in zip(labels_params, state_params, season_par
     plt.savefig(os.path.join(output_folder,f'traces/forestplot-{p}.pdf'))
     plt.close()
 
+
+# Save hyperdistributions
+# ~~~~~~~~~~~~~~~~~~~~~~~
 
 # save the hyperdistributions
 med = trace.posterior.median(dim=("chain", "draw")) # take median across chains and draws

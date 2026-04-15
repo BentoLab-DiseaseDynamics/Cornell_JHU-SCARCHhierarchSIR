@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SCARCHhierarchSIR"
+version = "0.0"
+description = "An SIR Bayesian hierarchical influenza model"
+authors = [{name = "Dr. Tijs W. Alleman", email = "twa27@cornell.edu"}]
+license = "CC-BY-NC-SA-4.0"
+license-files = ["LICENSE-CC-BY-NC-SA.txt"]
+readme = "README.md"
+requires-python = "==3.13.*"
+dependencies = [
+    "numpy",
+    "pandas",
+    "jax",
+    "diffrax",
+    "optax",
+    "pymc>=5.0",
+    "pytensor",
+    "openpyxl",
+    "pytest",
+]
+
+[project.optional-dependencies]
+develop = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["tests", "tests.*"]

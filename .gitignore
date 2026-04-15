@@ -164,3 +164,6 @@ dmypy.json
 *.exe
 *.out
 *.app
+
+## Calibration data
+data/interim/calibration/
