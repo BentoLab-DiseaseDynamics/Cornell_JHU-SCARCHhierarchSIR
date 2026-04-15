@@ -30,6 +30,8 @@ import optax
 from SCARCHhierarchSIR.data import get_demography, get_adjacency_matrix, get_NHSN_HRD_data
 from SCARCHhierarchSIR.SIR_model import get_jax_jitted_model, make_sol_op
 from SCARCHhierarchSIR.pymc_model import AR_GARCH_step, compute_season_weights, weighted_nb_logp, weighted_nb_random
+from SCARCHhierarchSIR.preoptimization import preoptimize_parameters, compute_initial_effects
+
 
 # all paths defined relative to this file
 abs_dir = os.path.dirname(__file__)
@@ -94,72 +96,34 @@ sol_op = make_sol_op(args_static, jitted_sol_op_multi, jitted_vjp_sol_op_multi)
 # Pre-optimize the forward simulation model's parameters
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# args diff initial guesses (ballpark estimates)
-beta = 0.455
-rho = 0.0025
-fI = 1e-4
-fR = 0.25
-delta_beta_vals = jnp.zeros(n_modifiers)
-
-# compute gradient-safe transformations
-args_diff = jnp.concatenate([
-                jnp.array([jnp.log(jnp.exp(beta) - 1), jnp.log(jnp.exp(rho) - 1), jnp.log(jnp.exp(fI) - 1), jnp.log(fR / (1 - fR))]),
-                jnp.arctanh(delta_beta_vals / 0.25)
-            ])
-args_diff = jnp.expand_dims(args_diff, 0).repeat(n_seasons, axis=0)
-
-# construct initial differentiable arguments vector
-## gradient safe transforms
-single_args_diff = jnp.concatenate([
-    jnp.array([jnp.log(jnp.exp(beta)-1),           # beta
-               jnp.log(jnp.exp(rho)-1),          # rho
-               jnp.log(jnp.exp(fI)-1),            # fI
-               jnp.log(fR / (1 - fR))]),         # fR
-    jnp.arctanh(delta_beta_vals / 0.25)            # delta_beta
-])   # shape: (4 + n_modifiers,)
-## broadcast across seasons and states
-args_diff = jnp.broadcast_to(single_args_diff, (n_seasons, n_states, single_args_diff.shape[0])) # shape: (n_seasons, n_states, n_params)
-
-
 # stack args_nodiff so two leading axes are seasons, states and the third axes gives the arguments for the season-state combination
 gamma_vec = jnp.full((n_seasons, n_states, 1), gamma)
 pop_mat = jnp.broadcast_to(jnp.asarray(demo)[None, :, None], (n_seasons, n_states, 1))
 ts_mat = jnp.broadcast_to(ts[:, None, :], (n_seasons, n_states, ts.shape[1]))
 args_nodiff = np.array(jnp.concatenate([gamma_vec, pop_mat, ts_mat], axis=2))     # shape: (n_seasons, n_states, )  --> convert to numpy otherwise error in pt.as_tensor_variable(args_nodiff) in make_node of pyMC model
 
-# define SSE likelihood
-def neg_log_likelihood(args_diff):
-    # 1. convert back to untransformed values
-    block_1 = jax.nn.softplus(args_diff[:, :, 0:3])        # beta, rho, fI
-    block_2 = jax.nn.sigmoid(args_diff[:, :, 3:4])         # fR
-    block_3 = 0.25 * jnp.tanh(args_diff[:, :, 4:])         # delta_beta
-    # 2. pack blocks into args_diff
-    args_diff = jnp.concatenate([block_1, block_2, block_3], axis=2)
-    # 3. run simulation
-    pred = jitted_sol_op_multi(args_diff, args_nodiff, args_static)
-    # 4. compute SSE loss
-    return jnp.sum((data - pred)**2)
-
-# optimize
-optimizer = optax.adam(1e-2)
-opt_state = optimizer.init(args_diff)
-for i in range(n_preoptim):
-    loss, grads = jax.value_and_grad(neg_log_likelihood)(args_diff)
-    updates, opt_state = optimizer.update(grads, opt_state)
-    args_diff = optax.apply_updates(args_diff, updates)
-    if i % 100 == 0:
-        print(i+100, float(loss))
-
-# convert back to untransformed values
-block_1 = jax.nn.softplus(args_diff[:, :, 0:3])         # beta, rho, fI
-block_2 = jax.nn.sigmoid(args_diff[:, :, 3:4])          # fR
-block_3 = 0.25 * jnp.tanh(args_diff[:, :, 4:])          # delta_beta
-args_diff = jnp.concatenate([block_1, block_2, block_3], axis=2)  # also back to numpy otherwise initial point will fail
+# pre-optimize the initial guesses
+args_diff_preoptim = preoptimize_parameters(
+    jitted_sol_op=jitted_sol_op_multi,
+    args_static=args_static,
+    args_nodiff=args_nodiff,
+    data=data,
+    init_params=dict(
+        beta=0.455,
+        rho=0.0025,
+        fI=1e-4,
+        fR=0.25,
+        delta_beta=jnp.zeros(n_modifiers),
+    ),
+    n_seasons=n_seasons,
+    n_states=n_states,
+    n_iter=n_preoptim,
+)
 
 # run simulation
-out = jitted_sol_op_multi(args_diff, args_nodiff, args_static)
+out = jitted_sol_op_multi(args_diff_preoptim, args_nodiff, args_static)
 
-# inspect result
+# visualise the result
 for s in range(n_states):
     fig, ax = plt.subplots(nrows=1, figsize=(8.7, 11.3/4))
     for i in range(n_seasons):
@@ -171,43 +135,20 @@ for s in range(n_states):
     plt.savefig(os.path.join(output_folder,f'initial-optim/state_{state_fips_index.iloc[s]['fips_state']}_{state_fips_index.iloc[s]['abbreviation_state']}.pdf'))
     plt.close(fig)
 
-# store 2D vector per variable so we can start the chains easily: shape: (n_seasons, n_states)
-beta_opt = np.array(args_diff[:,:,0])
-rho_opt = np.array(args_diff[:,:,1])
-fI_opt = np.array(args_diff[:,:,2])
-fR_opt = np.array(args_diff[:,:,3])
-delta_beta_opt = np.array(args_diff[:,:,4:])
-delta_beta_mu_opt = np.transpose(np.mean(delta_beta_opt, axis=0))
+# compute pyMC initial effect sizes
+init = compute_initial_effects(args_diff_preoptim)
 
-# transform into estimates of global, state and season effects
-## rho
-log_rho_opt = np.log(rho_opt)
-log_rho_global_init = np.mean(log_rho_opt) # global mean
-rho_state_init = np.mean(log_rho_opt, axis=0) - log_rho_global_init # state effects (average across seasons, zero-mean)
-rho_season_init = np.mean(log_rho_opt, axis=1) - log_rho_global_init # season effects (average across states, zero-mean)
-reconstructed = log_rho_global_init + rho_state_init[None, :] + rho_season_init[:, None]
-print("Mean log-rho:", log_rho_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - log_rho_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - log_rho_opt).max())
-## fI
-log_fI_opt = np.log(fI_opt)
-log_fI_global_init = np.mean(log_fI_opt) # global mean
-fI_state_init = np.mean(log_fI_opt, axis=0) - log_fI_global_init # state effects (average across seasons, zero-mean)
-fI_season_init = np.mean(log_fI_opt, axis=1) - log_fI_global_init # season effects (average across states, zero-mean)
-reconstructed = log_fI_global_init + fI_state_init[None, :] + fI_season_init[:, None]
-print("Mean log-fI:", log_fI_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - log_fI_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - log_fI_opt).max())
-## fR
-from scipy.special import logit
-logit_fR_opt = logit(fR_opt)
-logit_fR_global_init = np.mean(logit_fR_opt) # global mean
-fR_state_init = np.mean(logit_fR_opt, axis=0) - logit_fR_global_init # state effects (average across seasons, zero-mean)
-fR_season_init = np.mean(logit_fR_opt, axis=1) - logit_fR_global_init # season effects (average across states, zero-mean)
-reconstructed = logit_fR_global_init + fR_state_init[None, :] + fR_season_init[:, None]
-print("Mean logit-fR:", logit_fR_global_init)
-print("Mean reconstruction error:", np.abs(reconstructed - logit_fR_opt).mean())
-print("Max reconstruction error:", np.abs(reconstructed - logit_fR_opt).max())
+print("Mean log-rho:", init["log_rho"]["global"])
+print("Mean reconstruction error:", init["log_rho"]["error_mean"])
+print("Max reconstruction error:", init["log_rho"]["error_max"])
+
+print("Mean log-fI:", init["log_fI"]["global"])
+print("Mean reconstruction error:", init["log_fI"]["error_mean"])
+print("Max reconstruction error:", init["log_fI"]["error_max"])
+
+print("Mean logit-fR:", init["logit_fR"]["global"])
+print("Mean reconstruction error:", init["logit_fR"]["error_mean"])
+print("Max reconstruction error:", init["logit_fR"]["error_max"])
 
 # Build tempored NB distribution
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -234,7 +175,7 @@ with pm.Model(coords=coords) as model:
 
     ## ascertainment: rho
     ### global
-    log_rho_global_mean = pm.Normal("log_rho_global_mean", mu=np.log(np.mean(rho_opt)), sigma=1/3)    
+    log_rho_global_mean = pm.Normal("log_rho_global_mean", mu=init["log_rho"]["global"], sigma=1/3)    
     rho_global_mean = pm.Deterministic("rho_global_mean", pt.exp(log_rho_global_mean))
     ### state
     rho_state_sd = pm.HalfNormal("rho_state_sd", sigma=1/5)      
@@ -249,7 +190,7 @@ with pm.Model(coords=coords) as model:
 
     ## initial infected: fI
     ### global
-    log_fI_global_mean = pm.Normal("log_fI_global_mean", mu=np.log(np.mean(fI_opt)), sigma=1/3)    
+    log_fI_global_mean = pm.Normal("log_fI_global_mean", mu=init["log_fI"]["global"], sigma=1/3)    
     fI_global_mean = pm.Deterministic("fI_global_mean", pt.exp(log_fI_global_mean))
     ### state
     fI_state_sd = pm.HalfNormal("fI_state_sd", sigma=1/5)      
@@ -368,10 +309,10 @@ with model:
     step = pm.NUTS(step_scale=0.002, target_accept=0.8, max_treedepth=12)   # for US: step_scale: 0.002 + max_treedepth 12
     # run sampler without tuning
     trace = pm.sample(n_samples, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
-                        initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': delta_beta_mu_opt / 0.25,
-                                  'log_rho_global_mean': log_rho_global_init, 'rho_state_sd': 0.2, 'rho_state_raw': rho_state_init / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': rho_season_init / 0.2,
-                                  'log_fI_global_mean': log_fI_global_init, 'fI_state_sd': 0.2, 'fI_state_raw': fI_state_init / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': fI_season_init / 0.2,
-                                  'logit_fR_global_mean': logit_fR_global_init, 'fR_state_sd': 0.2, 'fR_state_raw': fR_state_init / 0.2, 'fR_season_sd': 0.2, 'fR_season_raw': fR_season_init / 0.2,
+                        initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': init["delta_beta_mu"] / 0.25,
+                                  'log_rho_global_mean': init["log_rho"]["global"], 'rho_state_sd': 0.2, 'rho_state_raw': init["log_rho"]["state"] / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': init["log_rho"]["season"] / 0.2,
+                                  'log_fI_global_mean': init["log_fI"]["global"], 'fI_state_sd': 0.2, 'fI_state_raw': init["log_fI"]["state"] / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': init["log_fI"]["season"] / 0.2,
+                                  'logit_fR_global_mean': init["logit_fR"]["global"], 'fR_state_sd': 0.2, 'fR_state_raw': init["logit_fR"]["state"] / 0.2, 'fR_season_sd': 0.2, 'fR_season_raw': init["logit_fR"]["season"] / 0.2,
                                   'logit_psi_global_mean': 0.75, 'logit_kappa_global_mean': 0.75}])
        
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
@@ -415,6 +356,9 @@ with model:
 # Save traces and posterior predictive
 arviz.to_netcdf(trace, os.path.join(output_folder,"trace.nc"))
 arviz.to_netcdf(posterior_predictive, os.path.join(output_folder,"posterior_predictive.nc"))
+
+# Visualisations
+# ~~~~~~~~~~~~~~
 
 # Visualise across-season modifier trend + within-season median per state
 os.makedirs(os.path.join(output_folder,'modifiers'), exist_ok=True)
@@ -526,6 +470,9 @@ for n, p_state, p_season, g, p, e in zip(labels_params, state_params, season_par
     plt.savefig(os.path.join(output_folder,f'traces/forestplot-{p}.pdf'))
     plt.close()
 
+
+# Save hyperdistributions
+# ~~~~~~~~~~~~~~~~~~~~~~~
 
 # save the hyperdistributions
 med = trace.posterior.median(dim=("chain", "draw")) # take median across chains and draws
