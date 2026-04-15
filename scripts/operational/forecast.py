@@ -48,11 +48,11 @@ training_folder = os.path.join(abs_dir, f'../../data/interim/calibration/trainin
 seasons = ['2025-2026',]        # script only works with one season
 n_observations = 52             # use all data available in the forecast season
 forecast_horizon = 4            # forecast 4 weeks ahead
-n_samples = 20
-n_tune = 10
+n_samples = 10
+n_tune = 5
 n_chains = 1
 sigma_grw = 0.375
-n_preoptim = 1000
+n_preoptim = 300
 
 # derived products
 ## convert to a list of start and enddates (datetime)
@@ -118,12 +118,6 @@ delta_beta_state_mean = np.transpose(hyperpars[modifier_cols].to_numpy())
 
 jitted_sol_op_multi, jitted_vjp_sol_op_multi = get_jax_jitted_model()
 
-# Define the Op and VJPOp classes for the ODE problem
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-args_static = (start_simulation, max(ts[:,-1]), modifier_length)
-sol_op = make_sol_op(args_static, jitted_sol_op_multi, jitted_vjp_sol_op_multi)
-
 # Pre-optimize the forward simulation model's parameters
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -168,6 +162,17 @@ for s in range(n_states):
     os.makedirs(os.path.join(output_folder, 'initial-optim'), exist_ok=True)
     plt.savefig(os.path.join(output_folder,f'initial-optim/state_{state_fips_index.iloc[s]['fips_state']}_{state_fips_index.iloc[s]['abbreviation_state']}.pdf'))
     plt.close(fig)
+
+# Define the Op and VJPOp classes for the ODE problem
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# reshape args_static and args_nodiff to simulate SIR model until data end + forecast horizon
+args_static = (start_simulation, max(ts[:,-1]), modifier_length)
+ts_mat = jnp.broadcast_to(ts[:, None, :], (n_seasons, n_states, ts.shape[1]))
+args_nodiff = np.array(jnp.concatenate([gamma_vec, pop_mat, ts_mat], axis=2))
+
+# generate the pyMC probablistic node
+sol_op = make_sol_op(args_static, jitted_sol_op_multi, jitted_vjp_sol_op_multi)
 
 # Build tempored NB distribution
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
