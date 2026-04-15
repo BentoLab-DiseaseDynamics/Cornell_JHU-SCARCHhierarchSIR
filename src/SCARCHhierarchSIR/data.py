@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, Optional, Tuple, List, Union
 
 # Define relevant global  variables
 abs_dir = os.path.dirname(__file__)
@@ -48,7 +48,7 @@ def get_demography(regions: Optional[Iterable[str]]=None) -> Tuple[pd.DataFrame,
     """
 
     demo = pd.read_csv(
-        os.path.join(abs_dir, "../../data/interim/demography/demography.csv")
+        os.path.join(abs_dir, "../../data/interim/demography/demography.csv"),
     )
 
     if regions is not None:
@@ -120,6 +120,8 @@ def get_most_recent_filename(data_folder: Path) -> Path:
     """
     Retrieve the most recent NHSN HRD parquet file path in a folder based on timestamps embedded in the filenames.
 
+    Also returns the CDC FluSight reference date of these data.
+
     Filenames are expected to contain the pattern:
     'gathered-YYYY-MM-DD-HH-MM-SS*.parquet.gzip'.
 
@@ -133,11 +135,16 @@ def get_most_recent_filename(data_folder: Path) -> Path:
     Path
         Path to the most recent file.
 
+    reference_date: str
+        CDC FluSight reference date
+
     Raises
     ------
     ValueError
         If no valid timestamped files are found.
     """
+
+    # find the most recent file
     pattern = re.compile(r"gathered-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
 
     files_with_time: List[Tuple[Path, Optional[datetime]]] = [
@@ -151,7 +158,18 @@ def get_most_recent_filename(data_folder: Path) -> Path:
         raise ValueError(f"No valid timestamped files found in {data_folder}")
 
     latest_file, _ = max(files_with_time, key=lambda x: x[1])
-    return latest_file
+
+    # return the reference date
+    pattern = re.compile(r"reference-date-(\d{4}-\d{2}-\d{2})")
+
+    match = pattern.search(latest_file.name)
+    if not match:
+        raise ValueError(f"No reference date found in {latest_file}")
+
+    reference_date = datetime.strptime(match.group(1), "%Y-%m-%d")
+
+    return latest_file, reference_date
+
 
 
 def get_NHSN_HRD_data(
@@ -186,6 +204,8 @@ def get_NHSN_HRD_data(
     Returns
     -------
     Tuple[np.ndarray, np.ndarray, np.ndarray]
+        reference_date: str (%Y-%M-%D)
+            CDC FluSight reference date (Saturday of week following data end)
         data : np.ndarray
             Shape: (n_seasons, n_states, n_timepoints), weekly admissions (scaled by 1/7).
         dates : np.ndarray
@@ -222,8 +242,9 @@ def get_NHSN_HRD_data(
 
     for start_calibration, modifier_reference_date in zip(start_calibrations, modifier_reference_dates):
 
-        # load most recent dataset
-        df = pd.read_parquet(get_most_recent_filename(data_folder))
+        # load most recent dataset and its CDC FluSight reference date
+        path, reference_date = get_most_recent_filename(data_folder)
+        df = pd.read_parquet(path)
 
         # basic cleaning
         ## convert date column to datetime and fips_state to int
@@ -280,4 +301,81 @@ def get_NHSN_HRD_data(
     if forecast_horizon:
         n_observations = len(timesteps_arr[0]) - forecast_horizon
 
-    return data_arr, dates_arr, timesteps_arr, n_observations
+    return reference_date, data_arr, dates_arr, timesteps_arr, n_observations
+
+########################################
+## Conversion and Hubverse formatting ##
+########################################
+
+def simout_to_hubverse(simout: arviz.InferenceData,
+                        reference_date: datetime,
+                        state_fips_index: dict,
+                        target: str,
+                        quantiles: bool=False) -> pd.DataFrame:
+    """
+    Convert pyMC simulation result to CDC FluSight's Hubverse format
+
+    Parameters
+    ----------
+
+    - simout: arviz.InferenceData
+        - pyMC simulation output. model state "pred". dimensions: (draw, state, horizon).
+        - flatten the 'chain' and 'draw' axes 
+
+    - reference_date: datetime
+        - when using data until a Saturday `x` to calibrate the model, `reference_date` is the date of the next saturday `x+1`.
+
+    - state_fips_index: dict
+        - keys: state abbreviations (e.g., 'MT', type str)
+        - values: state fips codes (e.g., '30', type str, with leading zero for fips codes 1-9)
+
+    - target: str
+        - simulation target, typically 'wk inc flu hosp'.
+
+    - quantiles: str
+        - save quantiles instead of individual trajectories.
+
+    Returns
+    -------
+
+    - hubverse_df: pd.Dataframe
+        - forecast in hubverse format
+        - contains the total hospital admissions in the 'value' column
+
+    Reference
+    ---------
+
+    https://github.com/cdcepi/FluSight-forecast-hub/blob/main/model-output/README.md#Forecast-file-format
+    """
+
+    # deduce information from simout
+    abbreviation_state = simout.coords["state"].values.tolist()
+    fips_state = [f"{state_fips_index[s]:02d}" for s in abbreviation_state]
+    output_type_id = simout.coords['draw'].values if not quantiles else [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99]
+    # fixed metadata
+    horizon = simout.coords["horizon"].values.tolist()
+    output_type = 'samples' if not quantiles else 'quantile'
+
+    # pre-allocate dataframe
+    idx = pd.MultiIndex.from_product([[reference_date,], [target,], horizon, fips_state, [output_type,], output_type_id],
+                                        names=['reference_date', 'target', 'horizon', 'location', 'output_type', 'output_type_id'])
+    df = pd.DataFrame(index=idx, columns=['value',])
+    # attach target end date
+    df = df.reset_index()
+    df['target_end_date'] = df.apply(lambda row: row['reference_date'] + timedelta(weeks=row['horizon']), axis=1)
+
+    # fill in dataframe
+    for fips,abbrev in zip(fips_state, abbreviation_state):
+        if not quantiles:
+            for draw in output_type_id:
+                df.loc[((df['output_type_id'] == draw) & (df['location'] == fips)), 'value'] = \
+                    7*simout.sel(state=abbrev).sel({'draw': draw}).values
+        else:
+            for q in output_type_id:
+                df.loc[((df['output_type_id'] == q) & (df['location'] == fips)), 'value'] = \
+                    7*simout.sel(state=abbrev).quantile(q=q, dim='draw').values
+    
+    # Round to the closest integer and convert to int
+    df["value"] = df["value"].round().astype(int)
+
+    return df
