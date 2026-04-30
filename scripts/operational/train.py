@@ -43,7 +43,7 @@ start_simulation = -15 # (October 1)
 ## geographical extent of training
 regions = ['New England', 'Middle Atlantic']
 ## temporal extent of training
-n_observations = 52
+n_observations = 30
 start_calibration_month = 10
 seasons = ['2023-2024', '2024-2025', '2025-2026']
 ## sampling effort
@@ -78,6 +78,8 @@ adj = get_adjacency_matrix(state_fips_index['abbreviation_state'])
 
 reference_date, data, dt, ts, n_observations = get_NHSN_HRD_data(start_calibrations, modifier_reference_dates, n_observations, forecast_horizon=None, state_fips=state_fips_index['fips_state'].values) # (n_season, n_variables, n_observations)
 data = data / 7 # divide weekly incidence by 7
+
+# TODO: assert if there's nan in data
 
 # Define a jax-jitted diffrax differential equation model
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
