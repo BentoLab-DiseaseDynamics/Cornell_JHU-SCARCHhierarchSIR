@@ -43,12 +43,12 @@ start_simulation = -15 # (October 1)
 ## geographical extent of training
 regions = ['New England', 'Middle Atlantic']
 ## temporal extent of training
-n_observations = 25
+n_observations = 52
 start_calibration_month = 10
 seasons = ['2023-2024', '2024-2025', '2025-2026']
 ## sampling effort
-n_chains = 1
-n_sample = 2
+n_chains = 5
+n_sample = 200
 n_burn = 0
 training_name = 'exclude_None'
 n_preoptim = 1000
@@ -307,7 +307,7 @@ with pm.Model(coords=coords) as model:
 
 with model:
     # set step size directly
-    step = pm.NUTS(step_scale=0.002, target_accept=0.8, max_treedepth=12)   # for US: step_scale: 0.002 + max_treedepth 12
+    step = pm.NUTS(step_scale=0.005, target_accept=0.8, max_treedepth=10)   # for US: step_scale: 0.002 + max_treedepth 12, For NE+MA: step_scale: 0.005 + max_treedepth 10
     # run sampler without tuning
     trace = pm.sample(n_sample, tune=0, chains=n_chains, init='adapt_diag', cores=1, progressbar=True, step = step,
                         initvals=n_chains*[{'alpha_inv': 0.05 * pt.ones(n_states), 'delta_beta_raw': init["delta_beta_mu"] / 0.25,
