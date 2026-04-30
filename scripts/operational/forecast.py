@@ -94,8 +94,7 @@ fI_season_sd            = hyperpars['fI_season_sd'].unique()[0]
 fR_global_mean          = hyperpars['fR_global_mean'].unique()[0]
 fR_season_sd            = hyperpars['fR_season_sd'].unique()[0]
 omega                   = hyperpars['omega'].unique()[0]
-psi_spatial_shocks      = hyperpars['psi_spatial_shocks'].unique()[0]
-psi_spatial_modifiers   = hyperpars['psi_spatial_modifiers'].unique()[0]
+psi_2                   = hyperpars['psi_2'].unique()[0]
 psi_global_mean         = hyperpars['psi_global_mean'].unique()[0]
 kappa_global_mean       = hyperpars['kappa_global_mean'].unique()[0]
 phi                     = hyperpars['phi'].unique()[0]
@@ -223,10 +222,11 @@ with pm.Model(coords=coords) as model:
 
     # ------- AR-GARCH modifiers -----------
 
-    # Spatial correlation ('psi_spatial_shocks' hyperparameter)
+    # Spatial correlation ('psi_2' hyperparameter)
+    I = pt.eye(n_states)
     W = pt.as_tensor_variable(adj)
     D = pt.diag(pt.sum(W, axis=1))
-    Q_shocks = D - psi_spatial_shocks * W + 1e-6 * pt.eye(n_states)
+    Q_shocks = (1 - psi_2) * I + psi_2 * (D - W)
     L_Q_shocks = pt.slinalg.cholesky(Q_shocks)
     L_cov_shocks = pt.slinalg.solve(L_Q_shocks, pt.eye(n_states))
 
