@@ -218,16 +218,20 @@ with pm.Model(coords=coords) as model:
     # ------- AR-GARCH modifiers -----------
 
     # Spatial correlation
-    psi_spatial_shocks = 0.99*pm.Beta("psi_spatial_shocks", 3, 1)
-    psi_spatial_modifiers = 0.99*pm.Beta("psi_spatial_modifiers", 3, 3)
+    psi_1 = pm.Beta("psi_1", 3, 3)
+    psi_2 = pm.Beta("psi_2", 3, 1)
+
+    I = pt.eye(n_states)
     W = pt.as_tensor_variable(adj)
     D = pt.diag(pt.sum(W, axis=1))
-    Q_shocks = D - psi_spatial_shocks * W + 1e-6 * pt.eye(n_states)
-    L_Q_shocks = pt.slinalg.cholesky(Q_shocks)
-    L_cov_shocks = pt.slinalg.solve(L_Q_shocks, pt.eye(n_states))
-    Q_modifiers = D - psi_spatial_modifiers * W + 1e-6 * pt.eye(n_states)
+
+    Q_modifiers = (1 - psi_1) * I + psi_1 * (D - W)
     L_Q_modifiers = pt.slinalg.cholesky(Q_modifiers)
-    L_cov_modifiers = pt.slinalg.solve(L_Q_modifiers, pt.eye(n_states))
+    L_cov_modifiers = pt.slinalg.solve(L_Q_modifiers, I)
+    Q_shocks = (1 - psi_2) * I + psi_2 * (D - W)
+    L_Q_shocks = pt.slinalg.cholesky(Q_shocks)
+    L_cov_shocks = pt.slinalg.solve(L_Q_shocks, I)
+        
     # Hyperparameter for delta_beta_temporal
     delta_beta_raw = pm.Normal("delta_beta_raw", 0, 1, dims=("modifier","state"))
     delta_beta_state_mean = pm.Deterministic("delta_beta_state_mean", (1/4) * pt.einsum("ij,mj->mi", L_cov_modifiers, delta_beta_raw), dims=("modifier","state"))
@@ -324,7 +328,7 @@ variables2plot = [
                 'fI_global_mean', 'fI_state_sd', 'fI_state', 'fI_season_sd', 'fI_season', 'fI',         # fI
                 'fR_global_mean', 'fR_state_sd', 'fR_state', 'fR_season_sd', 'fR_season', 'fR',         # fR
                 'delta_beta_state_mean',                                                    # delta_beta_mu
-                'psi_spatial_shocks', 'psi_spatial_modifiers',                                                                          # spatial correlation strength
+                'psi_2', 'psi_1',                                                                          # spatial correlation strength
                 'psi_global_mean', 'psi_state_sd', 'psi',                                               # AR 
                 'kappa_global_mean', 'kappa_state_sd', 'kappa', 'omega', 'phi',                         # GARCH parameters
                 'a_garch', 'b_garch', 'sigma2_0', 'sigma2_0_sigma',
@@ -484,8 +488,8 @@ scalar_params = [
     "fR_global_mean",
     "fR_season_sd",
     "omega",
-    "psi_spatial_shocks",
-    "psi_spatial_modifiers",
+    "psi_2",
+    "psi_1",
     "psi_global_mean",
     "kappa_global_mean",
     "phi",
