@@ -166,7 +166,7 @@ with initialization $z_{i,j}(0) = 0$ and $\varepsilon_{i,j}(0) = 0$. The innovat
 \end{equation}
 so that $\bm{\eta}_i(l) \sim \Normal\big(\bm{0}, \bm{Q}(\psi_2)^{-1}\big)$. Equation~\eqref{eq:ar1} represents the AR(1) dynamics governing deviations from the seasonal mean modifier, with persistence parameter $\phi_j$. The GARCH(1,1) process governs the time-varying innovation variance, where $\omega$ controls the baseline variance, $\alpha_j$ captures sensitivity to new shocks, and $\beta_j$ controls persistence of volatility. Stationarity is ensured by constraining $\kappa_j = \alpha_j + \beta_j < 1$.\\
 
-The AR(1) persistence $\phi$ varies by state via a hierarchical logit-normal model,
+The AR(1) persistence $\phi_j$ varies by state via a hierarchical logit-normal model,
 \begin{align}
 	\text{logit}~ \phi_j &= \text{logit}\,\bar{\phi} + \sigma^{(j)}_\phi\, u^{(j)}_{\phi}, \nonumber \\	
 	\text{logit}\,\bar{\phi} &\sim \Normal(-1,\, 1), \nonumber\\
