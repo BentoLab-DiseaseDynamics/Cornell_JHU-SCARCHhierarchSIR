@@ -96,7 +96,7 @@ fR_global_mean          = hyperpars['fR_global_mean'].unique()[0]
 fR_season_sd            = hyperpars['fR_season_sd'].unique()[0]
 omega                   = hyperpars['omega'].unique()[0]
 psi_2                   = hyperpars['psi_2'].unique()[0]
-psi_global_mean         = hyperpars['psi_global_mean'].unique()[0]
+phi_global_mean         = hyperpars['phi_global_mean'].unique()[0]
 kappa_global_mean       = hyperpars['kappa_global_mean'].unique()[0]
 nu                      = hyperpars['nu'].unique()[0]
 sigma2_0_sigma          = hyperpars['sigma2_0_sigma'].unique()[0]
@@ -105,7 +105,7 @@ alpha_inv               = hyperpars['alpha_inv'].values
 rho_state               = hyperpars['rho_state'].values
 fI_state                = hyperpars['fI_state'].values
 fR_state                = hyperpars['fR_state'].values
-psi_state               = hyperpars['psi_state'].values
+phi_state               = hyperpars['phi_state'].values
 kappa_state             = hyperpars['kappa_state'].values
 
 ## hypermodifiers
@@ -239,9 +239,9 @@ with pm.Model(coords=coords) as model:
     eps_0 = pt.zeros([n_states,])
     # Steady state noise ('omega' hyperparameter)
     # Total AR persistence
-    ## global (psi_global_mean)
-    ## state (psi_state)
-    psi = pm.Deterministic("psi", pm.math.sigmoid(pm.math.logit(psi_global_mean) + pt.log(psi_state)))
+    ## global (phi_global_mean)
+    ## state (phi_state)
+    phi = pm.Deterministic("phi", pm.math.sigmoid(pm.math.logit(phi_global_mean) + pt.log(phi_state)))
     # sample iid standard normals as shocks
     eta_raw = pm.Normal("eta_raw", mu=0.0, sigma=1.0, dims=("modifier","state"))
     # correlate them across space using the precision matrix 
@@ -262,7 +262,7 @@ with pm.Model(coords=coords) as model:
         fn=AR_GARCH_step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
-        non_sequences=[psi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
+        non_sequences=[phi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
         return_updates=False
     )
 
@@ -295,7 +295,7 @@ with model:
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
 
 # Generate traces
-variables2plot = ['rho', 'fI', 'fR', 'psi', 'kappa', 'sigma2_0']
+variables2plot = ['rho', 'fI', 'fR', 'phi', 'kappa', 'sigma2_0']
 
 # Save original traces
 os.makedirs(os.path.join(output_folder, 'traces'), exist_ok=True)
