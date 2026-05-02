@@ -36,6 +36,7 @@ abs_dir = os.path.dirname(__file__)
 
 # global parameters go here
 ## model-structural
+use_garch = False
 gamma = 1/3.5
 n_modifiers = 26
 modifier_length = 7
@@ -47,10 +48,10 @@ n_observations = 30
 start_calibration_month = 10
 seasons = ['2023-2024', '2024-2025', '2025-2026']
 ## sampling effort
-n_chains = 6
-n_sample = 400
-n_burn = 100
-training_name = 'exclude_None'
+n_chains = 3
+n_sample = 100
+n_burn = 25
+training_name = 'exclude_None-woGARCH'
 n_preoptim = 1000
 
 # derived products
@@ -242,8 +243,6 @@ with pm.Model(coords=coords) as model:
     # Initial position
     z_0 = pt.zeros([n_seasons, n_states])
     eps_0 = pt.zeros([n_seasons, n_states])
-    # Steady state noise
-    omega = pm.LogNormal("omega", mu=pt.log(0.01/3), sigma=1/5)  
     # Total AR persistence
     ## global
     logit_psi_global_mean = pm.Normal("logit_psi_global_mean", mu=-1, sigma=1)
@@ -268,10 +267,13 @@ with pm.Model(coords=coords) as model:
     kappa_state_raw = pm.Normal("kappa_state_raw", 0, 1, dims="state")
     kappa_state = pm.Deterministic("kappa_state", pt.exp(kappa_state_sd * kappa_state_raw), dims="state")
     kappa = pm.Deterministic("kappa", pm.math.sigmoid(logit_kappa_global_mean + kappa_state_sd * kappa_state_raw))      
-    # Split between a and b                                                   
+    ## Split between a and b                                                   
     phi = pm.Beta("phi", 5, 1)                                                                  
     a_garch = pm.Deterministic("a_garch", kappa * phi)                                                          
-    b_garch = pm.Deterministic("b_garch", kappa * (1 - phi))                           
+    b_garch = pm.Deterministic("b_garch", kappa * (1 - phi))
+    # Steady state noise
+    omega = pm.LogNormal("omega", mu=pt.log(0.01/3), sigma=1/5)    
+    # Initial noise                         
     sigma2_0_sigma = pm.HalfNormal('sigma2_0_sigma', sigma=1/5)
     sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims=("season","state"))
 
@@ -280,7 +282,7 @@ with pm.Model(coords=coords) as model:
         fn=AR_GARCH_step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
-        non_sequences=[psi, omega, a_garch, b_garch],
+        non_sequences=[psi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
         return_updates=False
     )
 

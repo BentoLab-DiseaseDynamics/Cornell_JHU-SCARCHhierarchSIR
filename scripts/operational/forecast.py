@@ -34,6 +34,7 @@ abs_dir = os.path.dirname(__file__)
 
 # global parameters go here
 ## model-structural
+use_garch = False
 gamma = 1/3.5
 n_modifiers = 26
 modifier_length = 7
@@ -42,11 +43,11 @@ start_simulation = -15
 regions = ['New England', 'Middle Atlantic']
 ## training metadata
 start_calibration_month = 10
-training_name = 'exclude_None'
+training_name = 'exclude_None-woGARCH'
 training_folder = os.path.join(abs_dir, f'../../data/interim/calibration/training/{training_name}')
 ## forecasting settings
 seasons = ['2025-2026',]        # script only works with one season
-n_observations = 52             # use all data available in the forecast season
+n_observations = 25             # use all data available in the forecast season
 forecast_horizon = 4            # forecast 4 weeks ahead
 n_preoptim = 500
 n_sample = 10
@@ -261,7 +262,7 @@ with pm.Model(coords=coords) as model:
         fn=AR_GARCH_step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
-        non_sequences=[psi, omega, a_garch, b_garch],
+        non_sequences=[psi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
         return_updates=False
     )
 
