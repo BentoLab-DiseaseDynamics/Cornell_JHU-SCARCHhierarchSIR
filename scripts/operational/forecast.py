@@ -98,7 +98,7 @@ omega                   = hyperpars['omega'].unique()[0]
 psi_2                   = hyperpars['psi_2'].unique()[0]
 psi_global_mean         = hyperpars['psi_global_mean'].unique()[0]
 kappa_global_mean       = hyperpars['kappa_global_mean'].unique()[0]
-phi                     = hyperpars['phi'].unique()[0]
+nu                      = hyperpars['nu'].unique()[0]
 sigma2_0_sigma          = hyperpars['sigma2_0_sigma'].unique()[0]
 ## (state) vectors
 alpha_inv               = hyperpars['alpha_inv'].values
@@ -252,9 +252,9 @@ with pm.Model(coords=coords) as model:
     ## global (kappa_global_mean)
     ## state (kappa_state)
     kappa = pm.Deterministic("kappa", pm.math.sigmoid(pm.math.logit(kappa_global_mean) + pt.log(kappa_state)))      
-    # Split between a and b (phi & sigma2_0_sigma hyperparameter)                                                                                                             
-    a_garch = pm.Deterministic("a_garch", kappa * phi)                                                          
-    b_garch = pm.Deterministic("b_garch", kappa * (1 - phi))                           
+    # Split between a and b (nu & sigma2_0_sigma hyperparameter)                                                                                                             
+    a_garch = pm.Deterministic("a_garch", kappa * nu)                                                          
+    b_garch = pm.Deterministic("b_garch", kappa * (1 - nu))                           
     sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims="state")
 
     # Run AR-GARCH scan over T steps

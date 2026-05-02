@@ -268,9 +268,9 @@ with pm.Model(coords=coords) as model:
     kappa_state = pm.Deterministic("kappa_state", pt.exp(kappa_state_sd * kappa_state_raw), dims="state")
     kappa = pm.Deterministic("kappa", pm.math.sigmoid(logit_kappa_global_mean + kappa_state_sd * kappa_state_raw))      
     ## Split between a and b                                                   
-    phi = pm.Beta("phi", 5, 1)                                                                  
-    a_garch = pm.Deterministic("a_garch", kappa * phi)                                                          
-    b_garch = pm.Deterministic("b_garch", kappa * (1 - phi))
+    nu = pm.Beta("nu", 5, 1)                                                                  
+    a_garch = pm.Deterministic("a_garch", kappa * nu)                                                          
+    b_garch = pm.Deterministic("b_garch", kappa * (1 - nu))
     # Steady state noise
     omega = pm.LogNormal("omega", mu=pt.log(0.01/3), sigma=1/5)    
     # Initial noise                         
@@ -346,7 +346,7 @@ for var in variables2plot:
     plt.close()
 
 # Build pair plots
-arviz.plot_pair(trace, var_names=["kappa", "phi", "omega", "psi"], divergences=True)
+arviz.plot_pair(trace, var_names=["kappa", "nu", "omega", "psi"], divergences=True)
 plt.savefig(os.path.join(output_folder,'traces/pairplot-ARGARCH.pdf'))
 plt.close()
 
@@ -496,7 +496,7 @@ scalar_params = [
     "psi_2",
     "psi_global_mean",
     "kappa_global_mean",
-    "phi",
+    "nu",
     "sigma2_0_sigma"
 ]
 for p in scalar_params:
