@@ -245,17 +245,17 @@ with pm.Model(coords=coords) as model:
     eps_0 = pt.zeros([n_seasons, n_states])
     # Total AR persistence
     ## global
-    logit_psi_global_mean = pm.Normal("logit_psi_global_mean", mu=0, sigma=1)
-    psi_global_mean = pm.Deterministic("psi_global_mean", pm.math.sigmoid(logit_psi_global_mean))
+    logit_phi_global_mean = pm.Normal("logit_phi_global_mean", mu=0, sigma=1)
+    phi_global_mean = pm.Deterministic("phi_global_mean", pm.math.sigmoid(logit_phi_global_mean))
     ## state
-    psi_state_sd = pm.HalfNormal("psi_state_sd", sigma=1/5)
-    psi_state_raw = pm.Normal("psi_state_raw", 0, 1, dims="state")
-    psi_state = pm.Deterministic("psi_state", pt.exp(psi_state_sd * psi_state_raw), dims="state")
+    phi_state_sd = pm.HalfNormal("phi_state_sd", sigma=1/5)
+    phi_state_raw = pm.Normal("phi_state_raw", 0, 1, dims="state")
+    phi_state = pm.Deterministic("phi_state", pt.exp(phi_state_sd * phi_state_raw), dims="state")
     ## season
-    psi_season_sd = pm.HalfNormal("psi_season_sd", sigma=1/5)
-    psi_season_raw = pm.Normal("psi_season_raw", 0, 1, dims="season")
-    psi_season = pm.Deterministic("psi_season", pt.exp(psi_season_sd * psi_season_raw), dims="season")    
-    psi = pm.Deterministic("psi", pm.math.sigmoid(logit_psi_global_mean + psi_state_raw[None,:] * psi_state_sd + psi_season_raw[:, None] * psi_season_sd))
+    phi_season_sd = pm.HalfNormal("phi_season_sd", sigma=1/5)
+    phi_season_raw = pm.Normal("phi_season_raw", 0, 1, dims="season")
+    phi_season = pm.Deterministic("phi_season", pt.exp(phi_season_sd * phi_season_raw), dims="season")    
+    phi = pm.Deterministic("phi", pm.math.sigmoid(logit_phi_global_mean + phi_state_raw[None,:] * phi_state_sd + phi_season_raw[:, None] * phi_season_sd))
     # sample iid standard normals as shocks
     eta_raw = pm.Normal("eta_raw", mu=0.0, sigma=1.0, dims=("modifier","season","state"))
     # correlate them across space using the precision matrix
@@ -289,7 +289,7 @@ with pm.Model(coords=coords) as model:
         fn=AR_GARCH_step,
         sequences=[eta,],
         outputs_info=[z_0, sigma2_0, eps_0],
-        non_sequences=[psi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
+        non_sequences=[phi, omega, a_garch, b_garch, pt.as_tensor_variable(1 if use_garch else 0)],
         return_updates=False
     )
 
@@ -325,7 +325,7 @@ with model:
                                   'log_rho_global_mean': init["log_rho"]["global"], 'rho_state_sd': 0.2, 'rho_state_raw': init["log_rho"]["state"] / 0.2, 'rho_season_sd': 0.2, 'rho_season_raw': init["log_rho"]["season"] / 0.2,
                                   'log_fI_global_mean': init["log_fI"]["global"], 'fI_state_sd': 0.2, 'fI_state_raw': init["log_fI"]["state"] / 0.2, 'fI_season_sd': 0.2, 'fI_season_raw': init["log_fI"]["season"] / 0.2,
                                   'logit_fR_global_mean': init["logit_fR"]["global"], 'fR_state_sd': 0.2, 'fR_state_raw': init["logit_fR"]["state"] / 0.2, 'fR_season_sd': 0.2, 'fR_season_raw': init["logit_fR"]["season"] / 0.2,
-                                  'logit_psi_global_mean': 0.75, 'logit_kappa_global_mean': 0.75}])
+                                  'logit_phi_global_mean': 0.75, 'logit_kappa_global_mean': 0.75}])
        
 print(f"Step size post-tuning: {trace.sample_stats.step_size_bar.values}")
 
@@ -340,7 +340,7 @@ variables2plot = [
                 'fR_global_mean', 'fR_state_sd', 'fR_state', 'fR_season_sd', 'fR_season', 'fR',         # fR
                 'delta_beta_state_mean',                                                                # delta_beta_mu
                 'psi_2', 'psi_1',                                                                       # spatial correlation strength
-                'psi_global_mean', 'psi_state_sd', 'psi_season_sd', 'psi',                              # AR 
+                'phi_global_mean', 'phi_state_sd', 'phi_season_sd', 'phi',                              # AR 
                 'kappa_global_mean', 'kappa_state_sd', 'kappa_season_sd', 'kappa', 'omega', 'nu',      # GARCH parameters
                 'a_garch', 'b_garch', 'sigma2_0',
                 ]
@@ -353,7 +353,7 @@ for var in variables2plot:
     plt.close()
 
 # Build pair plots
-arviz.plot_pair(trace, var_names=["kappa", "nu", "omega", "psi"], divergences=True)
+arviz.plot_pair(trace, var_names=["kappa", "nu", "omega", "phi"], divergences=True)
 plt.savefig(os.path.join(output_folder,'traces/pairplot-ARGARCH.pdf'))
 plt.close()
 
@@ -437,11 +437,11 @@ for s in range(n_states):
 
 
 # visualise forest plots of state and season effect sizes
-labels_params = [r'$\rho$', r'$f_I$', r'$f_R$', r'$\psi$', r'$\kappa$']
-state_params = ["rho_state", "fI_state", "fR_state", "psi_state", "kappa_state"]
-season_params = ["rho_season", "fI_season", "fR_season", "psi_season", "kappa_season"]
-global_params = ["rho_global_mean", "fI_global_mean", "fR_global_mean", "psi_global_mean", "kappa_global_mean"]
-params = ['rho', 'fI', 'fR', 'psi', 'kappa']
+labels_params = [r'$\rho$', r'$f_I$', r'$f_R$', r'$\phi$', r'$\kappa$']
+state_params = ["rho_state", "fI_state", "fR_state", "phi_state", "kappa_state"]
+season_params = ["rho_season", "fI_season", "fR_season", "phi_season", "kappa_season"]
+global_params = ["rho_global_mean", "fI_global_mean", "fR_global_mean", "phi_global_mean", "kappa_global_mean"]
+params = ['rho', 'fI', 'fR', 'phi', 'kappa']
 effect_type = ['Multiplicative', 'Multiplicative', 'Odds-ratio', 'Odds-ratio', 'Odds-ratio']
 
 for n, p_state, p_season, g, p, e in zip(labels_params, state_params, season_params, global_params, params, effect_type):
@@ -499,8 +499,10 @@ scalar_params = [
     "omega",
     "psi_1",    
     "psi_2",
-    "psi_global_mean",
+    "phi_global_mean",
+    "phi_season_sd",
     "kappa_global_mean",
+    "kappa_season_sd",
     "nu",
 ]
 for p in scalar_params:
@@ -512,7 +514,7 @@ state_params = [
     "rho_state",
     "fI_state",
     "fR_state",
-    "psi_state",
+    "phi_state",
     "kappa_state",
 ]
 for p in state_params:
