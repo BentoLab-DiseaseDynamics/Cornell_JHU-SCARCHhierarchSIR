@@ -101,7 +101,6 @@ kappa_global_mean       = hyperpars['kappa_global_mean'].unique()[0]
 kappa_season_sd         = hyperpars['kappa_season_sd'].unique()[0]
 omega                   = hyperpars['omega'].unique()[0]
 nu                      = hyperpars['nu'].unique()[0]
-sigma2_0_sigma          = hyperpars['sigma2_0_sigma'].unique()[0]
 ## (state) vectors
 alpha_inv               = hyperpars['alpha_inv'].values
 rho_state               = hyperpars['rho_state'].values
@@ -255,10 +254,10 @@ with pm.Model(coords=coords) as model:
     kappa_season_raw = pm.Normal("kappa_season_raw", 0, 1, dims="season")
     kappa = pm.Deterministic("kappa", pm.math.sigmoid(pm.math.logit(kappa_global_mean) + pt.log(kappa_state)[None, :] + kappa_season_sd * kappa_season_raw[:, None]))
      
-    # Split between a and b (nu & sigma2_0_sigma hyperparameter)                                                                                                             
+    # Split between a and b (nu hyperparameter)                                                                                                             
     a_garch = pm.Deterministic("a_garch", kappa * nu)                                                          
     b_garch = pm.Deterministic("b_garch", kappa * (1 - nu))                           
-    sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims="state")
+    sigma2_0 = pm.Deterministic("sigma2_0", omega/(1-kappa), dims="state")
 
     # Run AR-GARCH scan over T steps
     z_seq, sigma2_seq, eps_seq = pytensor.scan(

@@ -283,8 +283,7 @@ with pm.Model(coords=coords) as model:
     # Steady state noise
     omega = pm.LogNormal("omega", mu=pt.log(0.01/3), sigma=1/5)    
     # Initial noise                         
-    sigma2_0_sigma = pm.HalfNormal('sigma2_0_sigma', sigma=1/5)
-    sigma2_0 = pm.LogNormal("sigma2_0", mu=pt.log(omega/(1-kappa)), sigma=sigma2_0_sigma, dims=("season","state"))
+    sigma2_0 = pm.Deterministic("sigma2_0", omega/(1-kappa), dims=("season","state"))
 
     # Run AR-GARCH scan over T steps
     z_seq, sigma2_seq, eps_seq = pytensor.scan(
@@ -344,7 +343,7 @@ variables2plot = [
                 'psi_2', 'psi_1',                                                                       # spatial correlation strength
                 'phi_global_mean', 'phi_state_sd', 'phi_season_sd', 'phi',                              # AR 
                 'kappa_global_mean', 'kappa_state_sd', 'kappa_season_sd', 'kappa', 'omega', 'phi',      # GARCH parameters
-                'a_garch', 'b_garch', 'sigma2_0', 'sigma2_0_sigma',
+                'a_garch', 'b_garch', 'sigma2_0',
                 ]
 
 # Save original traces
@@ -506,7 +505,6 @@ scalar_params = [
     "kappa_season_sd",
     "omega",
     "nu",
-    "sigma2_0_sigma"
 ]
 for p in scalar_params:
     df[p] = float(med[p].values)
