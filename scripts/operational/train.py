@@ -47,9 +47,9 @@ n_observations = 30
 start_calibration_month = 10
 seasons = ['2023-2024', '2024-2025', '2025-2026']
 ## sampling effort
-n_chains = 5
-n_sample = 200
-n_burn = 0
+n_chains = 6
+n_sample = 400
+n_burn = 100
 training_name = 'exclude_None'
 n_preoptim = 1000
 
@@ -490,8 +490,8 @@ scalar_params = [
     "fR_global_mean",
     "fR_season_sd",
     "omega",
+    "psi_1",    
     "psi_2",
-    "psi_1",
     "psi_global_mean",
     "kappa_global_mean",
     "phi",
