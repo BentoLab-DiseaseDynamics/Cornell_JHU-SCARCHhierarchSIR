@@ -245,13 +245,18 @@ with pm.Model(coords=coords) as model:
     eps_0 = pt.zeros([n_seasons, n_states])
     # Total AR persistence
     ## global
-    logit_phi_global_mean = pm.Normal("logit_phi_global_mean", mu=-1, sigma=1)
+    logit_phi_global_mean = pm.Normal("logit_phi_global_mean", mu=0, sigma=1)
     phi_global_mean = pm.Deterministic("phi_global_mean", pm.math.sigmoid(logit_phi_global_mean))
     ## state
-    phi_state_sd = pm.HalfNormal("phi_state_sd", sigma=1/2)
+    phi_state_sd = pm.HalfNormal("phi_state_sd", sigma=1/5)
     phi_state_raw = pm.Normal("phi_state_raw", 0, 1, dims="state")
     phi_state = pm.Deterministic("phi_state", pt.exp(phi_state_sd * phi_state_raw), dims="state")
-    phi = pm.Deterministic("phi", pm.math.sigmoid(logit_phi_global_mean + phi_state_sd * phi_state_raw))
+    ### season
+    phi_season_sd = pm.HalfNormal("phi_season_sd", sigma=1/5)
+    phi_season_raw = pm.Normal("phi_season_raw", 0, 1, dims="season")
+    phi_season = pm.Deterministic("phi_season", pt.exp(phi_season_sd * phi_season_raw), dims="season")
+    phi = pm.Deterministic("phi", pm.math.sigmoid(logit_phi_global_mean + phi_state_sd * phi_state_raw[None, :] + phi_season_sd * phi_season_raw[:, None]))
+
     # sample iid standard normals as shocks
     eta_raw = pm.Normal("eta_raw", mu=0.0, sigma=1.0, dims=("modifier","season","state"))
     # correlate them across space using the precision matrix
@@ -260,13 +265,17 @@ with pm.Model(coords=coords) as model:
     # --- GARCH(1,1) parameters ---                                                                             
     # Total noise persistence
     ## global
-    logit_kappa_global_mean = pm.Normal("logit_kappa_global_mean", mu=-1, sigma=1)
+    logit_kappa_global_mean = pm.Normal("logit_kappa_global_mean", mu=0, sigma=1)
     kappa_global_mean = pm.Deterministic("kappa_global_mean", pm.math.sigmoid(logit_kappa_global_mean))
     ## state
-    kappa_state_sd = pm.HalfNormal("kappa_state_sd", sigma=1/2)
+    kappa_state_sd = pm.HalfNormal("kappa_state_sd", sigma=1/5)
     kappa_state_raw = pm.Normal("kappa_state_raw", 0, 1, dims="state")
     kappa_state = pm.Deterministic("kappa_state", pt.exp(kappa_state_sd * kappa_state_raw), dims="state")
-    kappa = pm.Deterministic("kappa", pm.math.sigmoid(logit_kappa_global_mean + kappa_state_sd * kappa_state_raw))      
+    ### season
+    kappa_season_sd = pm.HalfNormal("kappa_season_sd", sigma=1/5)
+    kappa_season_raw = pm.Normal("kappa_season_raw", 0, 1, dims="season")
+    kappa_season = pm.Deterministic("kappa_season", pt.exp(kappa_season_sd * kappa_season_raw), dims="season")
+    kappa = pm.Deterministic("kappa", pm.math.sigmoid(logit_kappa_global_mean + kappa_state_sd * kappa_state_raw[None, :] + kappa_season_sd * kappa_season_raw[:, None]))
     ## Split between a and b                                                   
     nu = pm.Beta("nu", 5, 1)                                                                  
     a_garch = pm.Deterministic("a_garch", kappa * nu)                                                          
@@ -331,10 +340,10 @@ variables2plot = [
                 'rho_global_mean', 'rho_state_sd', 'rho_state', 'rho_season_sd', 'rho_season', 'rho',   # rho
                 'fI_global_mean', 'fI_state_sd', 'fI_state', 'fI_season_sd', 'fI_season', 'fI',         # fI
                 'fR_global_mean', 'fR_state_sd', 'fR_state', 'fR_season_sd', 'fR_season', 'fR',         # fR
-                'delta_beta_state_mean',                                                    # delta_beta_mu
-                'psi_2', 'psi_1',                                                                          # spatial correlation strength
-                'phi_global_mean', 'phi_state_sd', 'phi',                                               # AR 
-                'kappa_global_mean', 'kappa_state_sd', 'kappa', 'omega', 'phi',                         # GARCH parameters
+                'delta_beta_state_mean',                                                                # delta_beta_mu
+                'psi_2', 'psi_1',                                                                       # spatial correlation strength
+                'phi_global_mean', 'phi_state_sd', 'phi_season_sd', 'phi',                              # AR 
+                'kappa_global_mean', 'kappa_state_sd', 'kappa_season_sd', 'kappa', 'omega', 'phi',      # GARCH parameters
                 'a_garch', 'b_garch', 'sigma2_0', 'sigma2_0_sigma',
                 ]
 
@@ -460,16 +469,14 @@ for n, p_state, p_season, g, p, e in zip(labels_params, state_params, season_par
     ax_global.xaxis.set_major_locator(plt.MaxNLocator(3)) 
 
     # ---- Bottom row: state and season forest plots ----
+    ## state
     arviz.plot_forest(trace, var_names=[p_state], combined=True, hdi_prob=0.95, ax=axes[1, 0], colors='forestgreen')
     axes[1, 0].axvline(1, color="black", linestyle="--")
     axes[1, 0].set_title(f"{e} state effects", fontsize=12)
-
-    if ((p != 'phi') & (p != 'kappa')):
-        arviz.plot_forest(trace, var_names=[p_season], combined=True, hdi_prob=0.95, ax=axes[1, 1], colors='forestgreen')
-        axes[1, 1].axvline(1, color="black", linestyle="--")
-        axes[1, 1].set_title(f"{e} season effects", fontsize=12)
-    else:
-        axes[1, 1].remove()
+    ## season
+    arviz.plot_forest(trace, var_names=[p_season], combined=True, hdi_prob=0.95, ax=axes[1, 1], colors='forestgreen')
+    axes[1, 1].axvline(1, color="black", linestyle="--")
+    axes[1, 1].set_title(f"{e} season effects", fontsize=12)
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_folder,f'traces/forestplot-{p}.pdf'))
@@ -491,11 +498,13 @@ scalar_params = [
     "fI_season_sd",
     "fR_global_mean",
     "fR_season_sd",
-    "omega",
     "psi_1",    
     "psi_2",
     "phi_global_mean",
+    "phi_season_sd",
     "kappa_global_mean",
+    "kappa_season_sd",
+    "omega",
     "nu",
     "sigma2_0_sigma"
 ]

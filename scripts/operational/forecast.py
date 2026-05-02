@@ -94,10 +94,12 @@ fI_global_mean          = hyperpars['fI_global_mean'].unique()[0]
 fI_season_sd            = hyperpars['fI_season_sd'].unique()[0]
 fR_global_mean          = hyperpars['fR_global_mean'].unique()[0]
 fR_season_sd            = hyperpars['fR_season_sd'].unique()[0]
-omega                   = hyperpars['omega'].unique()[0]
 psi_2                   = hyperpars['psi_2'].unique()[0]
 phi_global_mean         = hyperpars['phi_global_mean'].unique()[0]
+phi_season_sd           = hyperpars['phi_season_sd'].unique()[0]
 kappa_global_mean       = hyperpars['kappa_global_mean'].unique()[0]
+kappa_season_sd         = hyperpars['kappa_season_sd'].unique()[0]
+omega                   = hyperpars['omega'].unique()[0]
 nu                      = hyperpars['nu'].unique()[0]
 sigma2_0_sigma          = hyperpars['sigma2_0_sigma'].unique()[0]
 ## (state) vectors
@@ -202,24 +204,21 @@ with pm.Model(coords=coords) as model:
     ### state (rho_state)
     ### season (rho_season_sd)
     rho_season_raw = pm.Normal("rho_season_raw", 0, 1, dims="season")
-    log_rho = pt.log(rho_global_mean) + pt.log(rho_state)[None, :] + rho_season_sd * rho_season_raw[:, None]
-    rho = pm.Deterministic("rho", pt.exp(log_rho))
+    rho = pm.Deterministic("rho", pt.exp(pt.log(rho_global_mean) + pt.log(rho_state)[None, :] + rho_season_sd * rho_season_raw[:, None]))
 
     ## initial infected: fI
     ### global (fI_global_mean)
     ### state (fI_state)
     ### season (fI_season_sd)
     fI_season_raw = pm.Normal("fI_season_raw", 0, 1, dims="season")
-    log_fI = pt.log(fI_global_mean) + pt.log(fI_state)[None, :] + fI_season_sd * fI_season_raw[:, None]
-    fI = pm.Deterministic("fI", pt.exp(log_fI))
+    fI = pm.Deterministic("fI", pt.exp(pt.log(fI_global_mean) + pt.log(fI_state)[None, :] + fI_season_sd * fI_season_raw[:, None]))
 
     ## initial recovered: fR
     ### global (fR_global_mean)
     ### state (fR_state)
     ### season (fR_season_sd)
     fR_season_raw = pm.Normal("fR_season_raw", 0, 1, dims="season")
-    logit_fR = pm.math.logit(fR_global_mean) + pt.log(fR_state)[None, :] + fR_season_sd * fR_season_raw[:, None]
-    fR = pm.Deterministic("fR", pm.math.sigmoid(logit_fR))
+    fR = pm.Deterministic("fR", pm.math.sigmoid(pm.math.logit(fR_global_mean) + pt.log(fR_state)[None, :] + fR_season_sd * fR_season_raw[:, None]))
 
     # ------- AR-GARCH modifiers -----------
 
@@ -237,11 +236,12 @@ with pm.Model(coords=coords) as model:
     # Initial position
     z_0 = pt.zeros([n_states,])
     eps_0 = pt.zeros([n_states,])
-    # Steady state noise ('omega' hyperparameter)
     # Total AR persistence
-    ## global (phi_global_mean)
-    ## state (phi_state)
-    phi = pm.Deterministic("phi", pm.math.sigmoid(pm.math.logit(phi_global_mean) + pt.log(phi_state)))
+    ### global (phi_global_mean)
+    ### state (phi_state)
+    ### season (phi_season_sd)
+    phi_season_raw = pm.Normal("phi_season_raw", 0, 1, dims="season")
+    phi = pm.Deterministic("phi", pm.math.sigmoid(pm.math.logit(phi_global_mean) + pt.log(phi_state)[None, :] + phi_season_sd * phi_season_raw[:, None]))
     # sample iid standard normals as shocks
     eta_raw = pm.Normal("eta_raw", mu=0.0, sigma=1.0, dims=("modifier","state"))
     # correlate them across space using the precision matrix 
@@ -249,9 +249,12 @@ with pm.Model(coords=coords) as model:
 
     # --- GARCH(1,1) parameters ---                                                                             
     # Total noise persistence
-    ## global (kappa_global_mean)
-    ## state (kappa_state)
-    kappa = pm.Deterministic("kappa", pm.math.sigmoid(pm.math.logit(kappa_global_mean) + pt.log(kappa_state)))      
+    ### global (kappa_global_mean)
+    ### state (kappa_state)
+    ### season (kappa_season_sd)
+    kappa_season_raw = pm.Normal("kappa_season_raw", 0, 1, dims="season")
+    kappa = pm.Deterministic("kappa", pm.math.sigmoid(pm.math.logit(kappa_global_mean) + pt.log(kappa_state)[None, :] + kappa_season_sd * kappa_season_raw[:, None]))
+     
     # Split between a and b (nu & sigma2_0_sigma hyperparameter)                                                                                                             
     a_garch = pm.Deterministic("a_garch", kappa * nu)                                                          
     b_garch = pm.Deterministic("b_garch", kappa * (1 - nu))                           
